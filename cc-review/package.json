@@ -4,6 +4,7 @@
   "description": "Keep or undo Claude Code's file edits change by change, like Copilot",
   "version": "0.1.0",
   "publisher": "local",
+  "license": "MIT",
   "private": true,
   "engines": {
     "vscode": "^1.140.0"
@@ -435,7 +436,7 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "npm run build && vitest run",
     "test:integration": "npm run build && node test/integration/run.mjs",
-    "package": "node esbuild.mjs --production && vsce package --skip-license --allow-missing-repository"
+    "package": "node esbuild.mjs --production && vsce package --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -8,9 +8,12 @@ There is one rule: a file is pending as long as it differs from its baseline. Ke
 
 Requires VS Code 1.140 or later (the stable release is fine; Insiders is not needed) and Node (for the hooks).
 
-1. Install the extension:
+1. Build and install the extension:
 
    ```sh
+   cd cc-review
+   npm install
+   npm run package
    code --install-extension cc-review-0.1.0.vsix
    ```
 
@@ -115,6 +118,7 @@ Prompt text is stored only on your machine, in `~/.cc-review/rounds/` (Claude Co
 ## Development
 
 ```sh
+cd cc-review
 npm install
 npm run build              # dist/extension.js, dist/hook.js
 npm test                   # unit + hook tests (vitest, 99)
@@ -122,9 +126,9 @@ npm run test:integration   # integration tests in a separate VS Code instance (2
 npm run package            # build the VSIX
 ```
 
-Press F5 to launch the Extension Development Host (`.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
+Open the `cc-review` folder in VS Code and press F5 to launch the Extension Development Host (`cc-review/.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
 
-Code under `core/` does not import `vscode`. The integration tests use the VS Code installed on this machine (override with `VSCODE_PATH`) with a separate user data directory, and point `CC_REVIEW_HOME` and `CLAUDE_CONFIG_DIR` at temporary directories, so real data is never touched. To debug the hooks, set `CC_REVIEW_DEBUG=1`; raw hook input is logged to `~/.cc-review/hook-debug.jsonl`.
+Code under `cc-review/src/core/` does not import `vscode`. The integration tests use the VS Code installed on this machine (override with `VSCODE_PATH`) with a separate user data directory, and point `CC_REVIEW_HOME` and `CLAUDE_CONFIG_DIR` at temporary directories, so real data is never touched. To debug the hooks, set `CC_REVIEW_DEBUG=1`; raw hook input is logged to `~/.cc-review/hook-debug.jsonl`.
 
 ## Acceptance checklist
 

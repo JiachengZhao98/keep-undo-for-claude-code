@@ -2,3 +2,7 @@ node_modules/
 dist/
 .vscode-test/
 *.vsix
+
+# Copied from the repository root by `npm run package`
+/README.md
+/LICENSE

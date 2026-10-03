@@ -30,6 +30,11 @@ if (!production) {
 fs.mkdirSync('dist', { recursive: true });
 fs.copyFileSync('node_modules/vscode-oniguruma/release/onig.wasm', 'dist/onig.wasm');
 
+// vsce only packages files inside this folder, but README and LICENSE live at the repository root
+if (production) {
+  for (const f of ['README.md', 'LICENSE']) fs.copyFileSync(`../${f}`, f);
+}
+
 if (watch) {
   for (const b of builds) await (await esbuild.context(b)).watch();
 } else {
