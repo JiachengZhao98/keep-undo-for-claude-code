@@ -100,21 +100,6 @@ The hooks always exit 0 and never print JSON, so they never affect Claude Code's
 
 Prompt text is stored only on your machine, in `~/.cc-review/rounds/` (Claude Code keeps its own transcripts locally too). A round is deleted once it is more than a day old and none of its files are pending, or once it is more than 7 days old.
 
-## Differences from the plan
-
-| Plan | Implementation | Why |
-| --- | --- | --- |
-| Requires VS Code Insiders | Stable release + `enable-proposed-api` in `argv.json` | `editorInsets` is still present in stable 1.140, and allowing it by extension ID does not check for Insiders; verified on the stable release |
-| Pre writes the baseline directly | Pre stages the content; Post (after a successful write) turns it into the baseline, checked against `tool_response.originalFile` | Avoids two problems: a baseline left behind by a rejected edit would count your later manual edits as Claude's, and the extension could clear an equal baseline while the permission prompt was open |
-| Back up to `settings.json.bak` | `settings.json.cc-review.bak` | `~/.claude/` already has a `settings.json.bak`, which must not be overwritten |
-| `vsce package --allow-proposed-apis` | Flag dropped | vsce 4.0 no longer has it; plain packaging works |
-| matcher `Edit\|Write` | `Edit\|Write\|MultiEdit` | Covers MultiEdit in older Claude Code versions; harmless where the tool does not exist |
-| — | Rebuild the baseline when the last Undo is undone | After the last change is undone, the file equals its baseline and the baseline is deleted; without rebuilding it, the change ⌘Z brings back would no longer be pending |
-| — | Cancel the Undo record when you ⌘Z an Undo | So Claude is not told something that is no longer true |
-| P5 "Ask Claude about this change" through a `vscode://anthropic.claude-code/open` link | Call `claude-vscode.primaryEditor.open`, the command Claude Code declares, and fall back to the link only when it is missing | The link handler just calls that command, and when another extension opens the link, VS Code first asks whether to allow opening the URI. The `session` argument also returns you to the session that made the change |
-| P5 group by `prompt_id` | Groups the current pending changes: line-level tracing through each round's before/after snapshots decides which round each change came from; each round's own diff can be viewed as well | Keep / Undo for a whole prompt is then just a set of per-change operations, consistent with what the editor shows, with no three-way merge |
-| P5 syntax highlighting for phantom lines | Bundled `vscode-textmate` + Oniguruma, reading the active theme file, the installed grammars and your `editor.tokenColorCustomizations` | VS Code has no API for extensions to get token colors; this keeps the colors identical to the editor's. Tokenizing from the start of the baseline, with caching, keeps multi-line constructs correct |
-
 ## Development
 
 ```sh
@@ -122,40 +107,13 @@ cd cc-review
 npm install
 npm run build              # dist/extension.js, dist/hook.js
 npm test                   # unit + hook tests (vitest, 99)
-npm run test:integration   # integration tests in a separate VS Code instance (26, including the P0 inset checks and P5)
+npm run test:integration   # integration tests in a separate VS Code instance (26)
 npm run package            # build the VSIX
 ```
 
 Open the `cc-review` folder in VS Code and press F5 to launch the Extension Development Host (`cc-review/.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
 
 Code under `cc-review/src/core/` does not import `vscode`. The integration tests use the VS Code installed on this machine (override with `VSCODE_PATH`) with a separate user data directory, and point `CC_REVIEW_HOME` and `CLAUDE_CONFIG_DIR` at temporary directories, so real data is never touched. To debug the hooks, set `CC_REVIEW_DEBUG=1`; raw hook input is logged to `~/.cc-review/hook-debug.jsonl`.
-
-## Acceptance checklist
-
-Covered by automated tests (unit / hook / integration / end to end with real Claude Code):
-
-- [x] P0: insets render in stable VS Code; they can sit at the top of the file (`line = -1`); their height is exactly lines × editor line height; 50 insets are created in 5 ms and scroll smoothly; they are rebuilt after switching tabs
-- [x] When Claude edits the same file over several rounds, the baseline stays the content from before the first edit
-- [x] A rejected edit (Pre without Post) leaves nothing pending
-- [x] New files from Claude: Keep takes them off the queue; Undo deletes them
-- [x] ⌘Z after Undo restores the change, and it becomes pending again
-- [x] After you undo a change, Claude is told about it with your next message (tested with real Claude Code 2.1.287)
-- [x] Typing in a pending file: edits outside Claude's changes are kept automatically
-- [x] An external revert (equivalent to git checkout / rewind) takes the file off the queue
-- [x] CRLF, UTF-8 BOM, binary files, large files, `.env` via `.ccreviewignore`
-- [x] P5: phantom lines are colored by the theme (tested with Dark 2026 and Light Modern); a deleted line inside a block comment gets the comment color; colors follow theme switches
-- [x] P5: grouping by prompt puts each change under the prompt that introduced it; Keep / Undo for a whole prompt; viewing one prompt's diff; the CodeLens shows where each change came from
-- [x] P5: Ask Claude prefills `@file#lines` and the original content and targets the session that made the change; the link's query is decoded exactly once after VS Code serializes it
-- [x] Real Claude Code 2.1.287: UserPromptSubmit and every Edit / Write for the same message carry the same `prompt_id`
-
-Needs checking by eye:
-
-- [ ] Horizontal alignment of phantom lines with the code, and how they behave when scrolling horizontally
-- [ ] Phantom line colors and alignment after switching themes or changing the font size
-- [ ] Files changed by subagents also enter the queue (the hooks fire for subagents too; not tested)
-- [ ] Pending state is fully restored after reloading the window
-- [ ] Behavior with several windows open at once
-- [ ] Click "Ask Claude" once in your own VS Code and confirm that Claude Code opens the session that made the change, with the text prefilled (the test instance has no Claude Code installed)
 
 ## Uninstall
 
