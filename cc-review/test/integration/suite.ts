@@ -1,5 +1,5 @@
 // Runs inside a real VS Code extension host. Claude is not needed: writing baselines and events and
-// editing files directly covers everything except the hook triggers. The P0 inset checks live here too.
+// editing files directly covers everything except the hook triggers. The inset rendering checks live here too.
 import * as assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -78,14 +78,14 @@ const activePath = () => {
 const tests: Array<[string, () => Promise<void>]> = [];
 const test = (name: string, fn: () => Promise<void>) => tests.push([name, fn]);
 
-// ---------------- P0 ----------------
+// ---------------- Inset rendering ----------------
 
-test('P0: editorInsets is available in stable VS Code with --enable-proposed-api', async () => {
+test('editorInsets is available in stable VS Code with --enable-proposed-api', async () => {
   assert.equal(typeof vscode.window.createWebviewTextEditorInset, 'function');
   assert.equal(api.controller.insets.isAvailable, true);
 });
 
-test('P0: insets render, fit at the top of the file, and are exactly lines x editor line height tall', async () => {
+test('insets render, fit at the top of the file, and are exactly lines x editor line height tall', async () => {
   const p = path.join(WS, 'p0.txt');
   fs.writeFileSync(p, Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'));
   const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
@@ -117,7 +117,7 @@ test('P0: insets render, fit at the top of the file, and are exactly lines x edi
   insets.forEach((i) => i.dispose());
 });
 
-test('P0: creation time with 50 insets at once', async () => {
+test('creation time with 50 insets at once', async () => {
   const p = path.join(WS, 'p0-many.txt');
   fs.writeFileSync(p, Array.from({ length: 120 }, (_, i) => `line ${i}`).join('\n'));
   const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
@@ -379,7 +379,7 @@ test('Keep All / Undo All (model level, no confirmation dialog)', async () => {
 });
 
 
-// ---------------- P5 ----------------
+// ---------------- Syntax highlighting, rounds, Ask Claude ----------------
 
 /** Simulate a round: record the message, write the file, store before/after snapshots, append a write event */
 function claudeRound(file: string, promptId: string, prompt: string, after: string, session = 'it-session'): void {
@@ -391,7 +391,7 @@ function claudeRound(file: string, promptId: string, prompt: string, after: stri
   appendJsonLine(L.events, { type: 'claude-write', path: file, tool: 'Edit', session, prompt: promptId, ts: Date.now() });
 }
 
-test('P5: phantom lines are highlighted with the active theme; a removed line inside a block comment gets the comment color', async () => {
+test('phantom lines are highlighted with the active theme; a removed line inside a block comment gets the comment color', async () => {
   const before = ['const a = 1;', '/* block', '   comment line */', 'function f(x: number) {', '  return "text" + x; // note', '}', ''].join('\n');
   const after = ['const a = 1;', '/* block */', 'function f(x: number) {', '  return x;', '}', ''].join('\n');
   const p = claudeWrites('hl/a.ts', before, after);
@@ -414,7 +414,7 @@ test('P5: phantom lines are highlighted with the active theme; a removed line in
   assert.notEqual(colorOf(returnLine, 'return'), colorOf(returnLine, '"text"'));
 });
 
-test('P5: colors follow a switch to a light theme', async () => {
+test('colors follow a switch to a light theme', async () => {
   const p = claudeWrites('hl/theme.ts', 'let x = "s"; // c\nend\n', 'end\n');
   const pf = await pending(p);
   const hl = api.controller.highlighter;
@@ -434,7 +434,7 @@ test('P5: colors follow a switch to a light theme', async () => {
   }
 });
 
-test('P5: grouping by round attributes each hunk to its round; Keep / Undo a round; view a round diff', async () => {
+test('grouping by round attributes each hunk to its round; Keep / Undo a round; view a round diff', async () => {
   const p = path.join(WS, 'rounds/r.ts');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, 'a\nb\nc\nd\ne\n');
@@ -476,7 +476,7 @@ test('P5: grouping by round attributes each hunk to its round; Keep / Undo a rou
   }
 });
 
-test('P5: CodeLens shows which round each hunk came from', async () => {
+test('CodeLens shows which round each hunk came from', async () => {
   const p = path.join(WS, 'rounds/lens.ts');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, 'x\ny\n');
@@ -490,7 +490,7 @@ test('P5: CodeLens shows which round each hunk came from', async () => {
   });
 });
 
-test('P5: Ask Claude prefills the @-mention and original content and targets the session that introduced the hunk', async () => {
+test('Ask Claude prefills the @-mention and original content and targets the session that introduced the hunk', async () => {
   const p = path.join(WS, 'askc/a.ts');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, 'one\ntwo\nthree\n');
@@ -504,7 +504,7 @@ test('P5: Ask Claude prefills the @-mention and original content and targets the
   assert.equal(target.session, 'sess-xyz');
 });
 
-test('P5: the Ask Claude URI query is decoded exactly once after VS Code serializes and parses it', async () => {
+test('the Ask Claude URI query is decoded exactly once after VS Code serializes and parses it', async () => {
   const tricky = 'About @src/a&b.ts#3-5 (naïve café ✓ 🚀): 100% = ok + "q"\n```ts\nconst x = a && b; // #tag ?y=1\n```\n';
   const uri = claudeOpenUri(tricky, 'abc-123');
   // VS Code opens the URI in its string form; the URL service parses it back before handing it to Claude Code's handler

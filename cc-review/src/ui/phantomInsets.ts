@@ -346,7 +346,7 @@ addEventListener('message', (e) => {
 });
 vscode.postMessage({ cmd: 'ready' });
 if (countColored() > 0) vscode.postMessage({ cmd: 'highlighted', colored: countColored() });
-// Report measured sizes (P0 alignment check). Not requestAnimationFrame: it pauses while the window is occluded
+// Report measured sizes, used to check alignment. Not requestAnimationFrame: it pauses while the window is occluded
 let last = -1;
 const report = () => {
   if (innerHeight === last || innerHeight === 0) return;
