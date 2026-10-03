@@ -1,0 +1,452 @@
+{
+  "name": "cc-review",
+  "displayName": "Claude Code Review (Keep/Undo)",
+  "description": "Keep or undo Claude Code's file edits change by change, like Copilot",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "enabledApiProposals": [
+    "editorInsets"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ccReview.keepHunk",
+        "title": "Keep Change",
+        "category": "Claude Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ccReview.undoHunk",
+        "title": "Undo Change",
+        "category": "Claude Review",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "ccReview.nextHunk",
+        "title": "Next Change",
+        "category": "Claude Review",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "ccReview.prevHunk",
+        "title": "Previous Change",
+        "category": "Claude Review",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "ccReview.keepFile",
+        "title": "Keep File",
+        "category": "Claude Review",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "ccReview.undoFile",
+        "title": "Undo File",
+        "category": "Claude Review",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "ccReview.keepAll",
+        "title": "Keep All",
+        "category": "Claude Review",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "ccReview.undoAll",
+        "title": "Undo All",
+        "category": "Claude Review",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "ccReview.reviewAll",
+        "title": "Review All Changes in a Multi-File Diff",
+        "category": "Claude Review",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "ccReview.openDiff",
+        "title": "Open Diff",
+        "category": "Claude Review",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ccReview.refresh",
+        "title": "Refresh",
+        "category": "Claude Review",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ccReview.installHooks",
+        "title": "Install Claude Code Hooks",
+        "category": "Claude Review"
+      },
+      {
+        "command": "ccReview.uninstallHooks",
+        "title": "Remove Claude Code Hooks",
+        "category": "Claude Review"
+      },
+      {
+        "command": "ccReview.clearAll",
+        "title": "Discard All Baselines (Leave Files Unchanged)",
+        "category": "Claude Review"
+      },
+      {
+        "command": "ccReview.dumpState",
+        "title": "Dump Review Queue (Debug)",
+        "category": "Claude Review"
+      },
+      {
+        "command": "ccReview.askClaude",
+        "title": "Ask Claude About This Change",
+        "category": "Claude Review",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "ccReview.groupByRound",
+        "title": "Group by Prompt",
+        "category": "Claude Review",
+        "icon": "$(history)"
+      },
+      {
+        "command": "ccReview.groupByFile",
+        "title": "Group by File",
+        "category": "Claude Review",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "ccReview.keepRound",
+        "title": "Keep Changes from This Prompt",
+        "category": "Claude Review",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "ccReview.undoRound",
+        "title": "Undo Changes from This Prompt",
+        "category": "Claude Review",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "ccReview.reviewRound",
+        "title": "Review Changes from This Prompt",
+        "category": "Claude Review",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "ccReview.openRoundDiff",
+        "title": "Show This Prompt's Changes to the File",
+        "category": "Claude Review"
+      },
+      {
+        "command": "ccReview.showRounds",
+        "title": "Show Changes from Recent Prompts",
+        "category": "Claude Review",
+        "icon": "$(history)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ccReview.keepHunk",
+        "key": "ctrl+alt+k",
+        "when": "editorTextFocus && ccReview.activeFileHasPending"
+      },
+      {
+        "command": "ccReview.undoHunk",
+        "key": "ctrl+alt+u",
+        "when": "editorTextFocus && ccReview.activeFileHasPending"
+      },
+      {
+        "command": "ccReview.nextHunk",
+        "key": "ctrl+alt+n",
+        "when": "editorTextFocus && ccReview.hasPending"
+      },
+      {
+        "command": "ccReview.prevHunk",
+        "key": "ctrl+alt+p",
+        "when": "editorTextFocus && ccReview.hasPending"
+      },
+      {
+        "command": "ccReview.askClaude",
+        "key": "ctrl+alt+c",
+        "when": "editorTextFocus && ccReview.activeFileHasPending && ccReview.claudeInstalled"
+      }
+    ],
+    "views": {
+      "scm": [
+        {
+          "id": "ccReview.changes",
+          "name": "Claude Changes"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "ccReview.changes",
+        "contents": "Claude Code hooks are not installed, so Claude's changes are not being recorded.\n[Install Hooks](command:ccReview.installHooks)",
+        "when": "!ccReview.hooksInstalled"
+      },
+      {
+        "view": "ccReview.changes",
+        "contents": "No pending Claude changes.",
+        "when": "ccReview.hooksInstalled"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ccReview.prevHunk",
+          "group": "navigation@101",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.nextHunk",
+          "group": "navigation@102",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.keepFile",
+          "group": "navigation@103",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.undoFile",
+          "group": "navigation@104",
+          "when": "ccReview.activeFileHasPending"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "ccReview.reviewAll",
+          "group": "navigation@1",
+          "when": "view == ccReview.changes && ccReview.hasPending"
+        },
+        {
+          "command": "ccReview.keepAll",
+          "group": "navigation@2",
+          "when": "view == ccReview.changes && ccReview.hasPending"
+        },
+        {
+          "command": "ccReview.undoAll",
+          "group": "navigation@3",
+          "when": "view == ccReview.changes && ccReview.hasPending"
+        },
+        {
+          "command": "ccReview.refresh",
+          "group": "1_misc",
+          "when": "view == ccReview.changes"
+        },
+        {
+          "command": "ccReview.clearAll",
+          "group": "1_misc",
+          "when": "view == ccReview.changes"
+        },
+        {
+          "command": "ccReview.groupByRound",
+          "group": "navigation@4",
+          "when": "view == ccReview.changes && ccReview.groupMode != round"
+        },
+        {
+          "command": "ccReview.groupByFile",
+          "group": "navigation@4",
+          "when": "view == ccReview.changes && ccReview.groupMode == round"
+        },
+        {
+          "command": "ccReview.showRounds",
+          "group": "1_misc",
+          "when": "view == ccReview.changes"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ccReview.openDiff",
+          "group": "inline@1",
+          "when": "view == ccReview.changes && viewItem == ccReview.file"
+        },
+        {
+          "command": "ccReview.keepFile",
+          "group": "inline@2",
+          "when": "view == ccReview.changes && viewItem == ccReview.file"
+        },
+        {
+          "command": "ccReview.undoFile",
+          "group": "inline@3",
+          "when": "view == ccReview.changes && viewItem == ccReview.file"
+        },
+        {
+          "command": "ccReview.keepHunk",
+          "group": "inline@1",
+          "when": "view == ccReview.changes && viewItem == ccReview.hunk"
+        },
+        {
+          "command": "ccReview.undoHunk",
+          "group": "inline@2",
+          "when": "view == ccReview.changes && viewItem == ccReview.hunk"
+        },
+        {
+          "command": "ccReview.askClaude",
+          "group": "inline@3",
+          "when": "view == ccReview.changes && viewItem == ccReview.hunk && ccReview.claudeInstalled"
+        },
+        {
+          "command": "ccReview.reviewRound",
+          "group": "inline@1",
+          "when": "view == ccReview.changes && viewItem == ccReview.round"
+        },
+        {
+          "command": "ccReview.keepRound",
+          "group": "inline@2",
+          "when": "view == ccReview.changes && viewItem =~ /^ccReview\\.(round|roundOther|roundFile)$/"
+        },
+        {
+          "command": "ccReview.undoRound",
+          "group": "inline@3",
+          "when": "view == ccReview.changes && viewItem =~ /^ccReview\\.(round|roundOther|roundFile)$/"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ccReview.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "ccReview.keepFile",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.undoFile",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.keepHunk",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.undoHunk",
+          "when": "ccReview.activeFileHasPending"
+        },
+        {
+          "command": "ccReview.askClaude",
+          "when": "ccReview.activeFileHasPending && ccReview.claudeInstalled"
+        },
+        {
+          "command": "ccReview.keepRound",
+          "when": "false"
+        },
+        {
+          "command": "ccReview.undoRound",
+          "when": "false"
+        },
+        {
+          "command": "ccReview.reviewRound",
+          "when": "false"
+        },
+        {
+          "command": "ccReview.openRoundDiff",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Review",
+      "properties": {
+        "ccReview.autoKeepUserEdits": {
+          "type": "boolean",
+          "default": true,
+          "description": "In a pending file, automatically merge your own edits outside Claude's changes into the baseline (an automatic Keep). When off, your edits stay pending together with Claude's changes."
+        },
+        "ccReview.phantomLines": {
+          "type": "string",
+          "enum": [
+            "inset",
+            "hover"
+          ],
+          "enumDescriptions": [
+            "Draw deleted lines on a red background between the code lines, using the proposed editorInsets API (requires --enable-proposed-api local.cc-review).",
+            "Only mark deletions in the gutter; hover to see the deleted lines."
+          ],
+          "default": "inset",
+          "description": "How deleted lines are shown."
+        },
+        "ccReview.maxInsetsPerEditor": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Maximum number of deleted-line insets in one editor at a time (each inset is a webview)."
+        },
+        "ccReview.maxFileSizeKB": {
+          "type": "number",
+          "default": 1024,
+          "description": "Files larger than this are not shown change by change in the editor; Keep or Undo them as whole files from the Claude Changes view."
+        },
+        "ccReview.showFilesOutsideWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also show files outside the current workspace that Claude changed."
+        },
+        "ccReview.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Keep | Undo above each change."
+        },
+        "ccReview.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path of the node executable the hooks run with. Leave empty to find it automatically."
+        },
+        "ccReview.trackBash": {
+          "type": "boolean",
+          "default": false,
+          "description": "(Experimental) Also hook Bash: in git repositories, take a snapshot with git stash create to capture files that Bash commands change. Adds tens to hundreds of milliseconds to each Bash command. Run \"Install Claude Code Hooks\" again after changing this."
+        },
+        "ccReview.syntaxHighlight": {
+          "type": "boolean",
+          "default": true,
+          "description": "Syntax-highlight deleted lines with the current theme (uses the same TextMate grammars and theme as VS Code, so the colors match the editor)."
+        },
+        "ccReview.groupBy": {
+          "type": "string",
+          "enum": [
+            "file",
+            "round"
+          ],
+          "enumDescriptions": [
+            "By file: file → changes",
+            "By prompt: each message you sent → files → changes"
+          ],
+          "default": "file",
+          "description": "How the Claude Changes view is grouped."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "npm run build && vitest run",
+    "test:integration": "npm run build && node test/integration/run.mjs",
+    "package": "node esbuild.mjs --production && vsce package --skip-license --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "~1.140.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "jsonc-parser": "^3.3.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
+  }
+}

@@ -1,0 +1,7 @@
+**
+!dist/extension.js
+!dist/hook.js
+!dist/onig.wasm
+!media/**
+!package.json
+!README.md
