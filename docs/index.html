@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Keep/Undo for Claude Code</title>
+<meta name="description" content="A VS Code extension that shows every change Claude Code makes to your files, with Keep and Undo on each one.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Keep/Undo for Claude Code">
+<meta property="og:description" content="A VS Code extension that shows every change Claude Code makes to your files, with Keep and Undo on each one.">
+<meta property="og:url" content="https://jiachengzhao98.github.io/keep-undo-for-claude-code/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2313202e'/%3E%3Crect x='7' y='9' width='18' height='5' rx='1.5' fill='%23ff958a'/%3E%3Crect x='7' y='18' width='18' height='5' rx='1.5' fill='%236fdc95'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Martian+Mono:wdth,wght@75..112.5,300..700&display=swap">
+<style>
+/* Layout: one left-aligned reading column; the hero is a live diff hunk, the rest sits beside an editor like documentation */
+:root {
+  --paper: #f2f4f7;
+  --panel: #ffffff;
+  --ink: #13202e;
+  --muted: #566476;
+  --rule: #d5dce5;
+  --accent: #1d5ccc;
+  --accent-ink: #ffffff;
+  --add-bg: #dcf2e3;
+  --add-bar: #2f9e5a;
+  --add-fg: #11683a;
+  --del-bg: #fbe3e1;
+  --del-fg: #ad2a20;
+  --lens: #6a7687;
+  --kw: #8a3fb0;
+  --fn: #1d5ccc;
+  --str: #9a5600;
+  --cm: #6f7b8b;
+  --chip: #e6ebf1;
+  --shadow: 0 1px 2px rgba(19, 32, 46, 0.06), 0 10px 28px rgba(19, 32, 46, 0.09);
+  --font-display: "Martian Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1620;
+    --panel: #15202c;
+    --ink: #e3e9f0;
+    --muted: #93a1b0;
+    --rule: #263445;
+    --accent: #5b9dff;
+    --accent-ink: #0a1420;
+    --add-bg: rgba(52, 168, 90, 0.17);
+    --add-bar: #3fb96c;
+    --add-fg: #6fdc95;
+    --del-bg: rgba(240, 86, 74, 0.16);
+    --del-fg: #ff958a;
+    --lens: #8796a7;
+    --kw: #d39cf5;
+    --fn: #79b0ff;
+    --str: #f0b46a;
+    --cm: #8190a1;
+    --chip: #1f2c3a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1620;
+  --panel: #15202c;
+  --ink: #e3e9f0;
+  --muted: #93a1b0;
+  --rule: #263445;
+  --accent: #5b9dff;
+  --accent-ink: #0a1420;
+  --add-bg: rgba(52, 168, 90, 0.17);
+  --add-bar: #3fb96c;
+  --add-fg: #6fdc95;
+  --del-bg: rgba(240, 86, 74, 0.16);
+  --del-fg: #ff958a;
+  --lens: #8796a7;
+  --kw: #d39cf5;
+  --fn: #79b0ff;
+  --str: #f0b46a;
+  --cm: #8190a1;
+  --chip: #1f2c3a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.6;
+}
+.wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+h2 {
+  font-family: var(--font-display);
+  font-stretch: 87.5%;
+  font-weight: 600;
+  font-size: clamp(1.25rem, 2.4vw, 1.6rem);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  margin: 0;
+  text-wrap: balance;
+}
+h3 { font-size: 1rem; font-weight: 600; margin: 0; }
+p { margin: 0; }
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+code, kbd {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.86em;
+  background: var(--chip);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+}
+kbd { border: 1px solid var(--rule); border-bottom-width: 2px; }
+
+/* ---------- header ---------- */
+.top { padding-block: 22px; }
+.top .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.mark { font-family: var(--font-display); font-weight: 600; font-size: 0.95rem; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
+.mark .k { color: var(--add-fg); }
+.mark .u { color: var(--del-fg); }
+.mark .rest { color: var(--muted); font-weight: 400; }
+.top nav { display: flex; gap: 20px; font-size: 0.95rem; }
+.top nav a { color: var(--muted); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+
+/* ---------- hero: a live hunk ---------- */
+.hero { padding-block: 40px 56px; }
+.hero .wrap { display: grid; gap: 28px; }
+.hunk {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  max-width: 920px;
+}
+.hunk-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.hunk-head .file { color: var(--ink); }
+.lens {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  padding: 12px 16px 4px calc(16px + 2.6rem);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.82rem;
+  color: var(--lens);
+}
+.lens button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.lens button:hover { color: var(--ink); background: var(--chip); }
+.lens .sep { opacity: 0.6; }
+.lens .meta { margin-left: 6px; }
+.rows { padding-bottom: 12px; }
+.row {
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr);
+  align-items: baseline;
+  padding: 6px 16px 6px 0;
+  border-left: 3px solid transparent;
+  transition: background-color 0.35s ease, color 0.35s ease;
+}
+.row .ln {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.75rem;
+  color: var(--lens);
+  text-align: right;
+  padding-right: 14px;
+}
+.hero-line {
+  font-family: var(--font-display);
+  font-stretch: 87.5%;
+  font-weight: 600;
+  font-size: clamp(1.3rem, 3.7vw, 2.55rem);
+  line-height: 1.22;
+  letter-spacing: -0.015em;
+  margin: 0;
+  text-wrap: balance;
+}
+.row.del { background: var(--del-bg); }
+.row.del .hero-line { color: var(--del-fg); font-weight: 500; }
+.row.add { background: var(--add-bg); border-left-color: var(--add-bar); }
+.row.add .hero-line { color: var(--ink); }
+.hunk[data-state="kept"] .row.del,
+.hunk[data-state="undone"] .row.add { display: none; }
+.hunk[data-state="kept"] .row.add,
+.hunk[data-state="undone"] .row.del { background: transparent; border-left-color: transparent; }
+.hunk[data-state="undone"] .row.del .hero-line { color: var(--ink); font-weight: 600; }
+.lens .done { color: var(--ink); }
+
+.lede { max-width: 62ch; font-size: 1.12rem; color: var(--ink); }
+.lede .muted { color: var(--muted); }
+.ctas { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-weight: 500;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.secondary { border-color: var(--rule); color: var(--ink); background: var(--panel); }
+.btn.secondary:hover { border-color: var(--muted); }
+.req { font-size: 0.9rem; color: var(--muted); }
+
+/* ---------- sections ---------- */
+section.band { padding-block: 64px; border-top: 1px solid var(--rule); }
+.band-head { display: grid; gap: 10px; margin-bottom: 32px; max-width: 64ch; }
+.band-head p { color: var(--muted); }
+
+/* ---------- editor mock ---------- */
+.split { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 36px; align-items: start; }
+.editor {
+  margin: 0;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  min-width: 0;
+}
+.tabs { display: flex; border-bottom: 1px solid var(--rule); font-size: 0.8rem; }
+.tab { padding: 8px 14px; border-right: 1px solid var(--rule); font-family: var(--font-display); font-stretch: 75%; }
+.tab .dot { color: var(--add-fg); }
+.code {
+  overflow-x: auto;
+  padding-block: 10px;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.78rem;
+  line-height: 1.75;
+}
+.l { display: grid; grid-template-columns: 3rem max-content; white-space: pre; min-width: max-content; border-left: 3px solid transparent; }
+.l .n { color: var(--lens); text-align: right; padding-right: 16px; }
+.l.add { background: var(--add-bg); border-left-color: var(--add-bar); }
+.l.del { background: var(--del-bg); }
+.l.del .c { color: var(--del-fg); }
+.l.cl .c { color: var(--lens); font-size: 0.92em; }
+.l.cl .c b { font-weight: 400; color: var(--ink); }
+.kw { color: var(--kw); }
+.fn { color: var(--fn); }
+.st { color: var(--str); }
+.cm { color: var(--cm); font-style: italic; }
+.l.del .kw, .l.del .fn, .l.del .st, .l.del .cm { color: inherit; }
+
+.aside { display: grid; gap: 22px; align-content: start; min-width: 0; }
+.notes { display: grid; gap: 22px; margin: 0; }
+.notes div { display: grid; gap: 4px; }
+.notes dt { font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.notes dd { margin: 0; color: var(--muted); }
+.swatch { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+.swatch.add { background: var(--add-bg); box-shadow: inset 3px 0 0 var(--add-bar); }
+.swatch.del { background: var(--del-bg); box-shadow: inset 0 0 0 1px var(--del-fg); }
+.swatch.lens { background: var(--chip); box-shadow: inset 0 0 0 1px var(--lens); }
+.keys { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; color: var(--muted); }
+
+/* ---------- end of turn ---------- */
+.turn { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; align-items: start; }
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  padding: 14px 16px 14px;
+  display: grid;
+  gap: 12px;
+  font-size: 0.92rem;
+}
+.toast-top { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+.toast-icon { width: 16px; height: 16px; margin-top: 3px; border-radius: 50%; background: var(--del-fg); color: var(--panel); display: grid; place-items: center; font-size: 11px; font-weight: 700; line-height: 1; }
+.toast-x { color: var(--muted); font-size: 1rem; line-height: 1; }
+.toast-src { font-size: 0.8rem; color: var(--muted); }
+.toast-btns { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.toast-btns span { padding: 4px 12px; border-radius: 3px; font-size: 0.85rem; background: var(--chip); color: var(--ink); }
+.toast-btns span.first { background: var(--accent); color: var(--accent-ink); }
+.caption { font-size: 0.9rem; color: var(--muted); margin-top: 12px; }
+
+.tree {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  font-size: 0.86rem;
+  padding-bottom: 8px;
+  overflow: hidden;
+}
+.tree-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.tree-head .count { background: var(--accent); color: var(--accent-ink); border-radius: 9px; padding: 0 7px; font-size: 0.7rem; letter-spacing: 0; }
+.tree-head .desc { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.tree-head .acts { margin-left: auto; display: flex; gap: 10px; color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; font-family: var(--font-display); font-stretch: 75%; }
+.ti { display: grid; grid-template-columns: 1rem auto minmax(0, 1fr); gap: 6px; align-items: baseline; padding: 3px 12px; white-space: nowrap; }
+.ti.child { padding-left: 34px; grid-template-columns: auto minmax(0, 1fr); }
+.ti .tw { color: var(--muted); font-size: 0.7rem; }
+.ti .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; font-size: 0.82rem; }
+.ti .d .p { color: var(--add-fg); }
+.ti .d .m { color: var(--del-fg); }
+.ti.sel { background: var(--chip); }
+.ti .hov { margin-left: auto; color: var(--muted); font-family: var(--font-display); font-stretch: 75%; font-size: 0.75rem; }
+.ti.child.sel { grid-template-columns: auto minmax(0, 1fr) auto; }
+
+/* ---------- features ---------- */
+.feats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px 36px; margin: 0; }
+.feats div { display: grid; gap: 6px; align-content: start; padding-top: 14px; border-top: 2px solid var(--rule); }
+.feats dt { font-weight: 600; }
+.feats dd { margin: 0; color: var(--muted); }
+
+/* ---------- how it works ---------- */
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; counter-reset: s; }
+.steps li { counter-increment: s; padding: 18px 20px 18px 0; display: grid; gap: 6px; align-content: start; border-top: 1px solid var(--rule); }
+.steps li::before {
+  content: counter(s);
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.steps p { color: var(--muted); font-size: 0.95rem; }
+.rule {
+  margin-top: 28px;
+  padding: 16px 20px;
+  border-left: 3px solid var(--add-bar);
+  background: var(--panel);
+  border-radius: 0 6px 6px 0;
+  max-width: 68ch;
+}
+
+/* ---------- install ---------- */
+.install { list-style: none; margin: 0; padding: 0; display: grid; gap: 28px; counter-reset: i; max-width: 760px; }
+.install > li { counter-increment: i; display: grid; grid-template-columns: 2.2rem minmax(0, 1fr); gap: 4px 14px; }
+.install > li::before {
+  content: counter(i);
+  grid-row: span 3;
+  font-family: var(--font-display);
+  font-weight: 600;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  display: grid;
+  place-items: center;
+}
+.install p { color: var(--muted); }
+.snippet { position: relative; margin-top: 8px; min-width: 0; }
+.snippet pre {
+  margin: 0;
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 14px 84px 14px 16px;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: 0.8rem;
+  line-height: 1.7;
+}
+.snippet pre .cm { font-style: normal; }
+.copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.copy:hover { border-color: var(--muted); }
+
+footer { border-top: 1px solid var(--rule); padding-block: 28px 40px; font-size: 0.9rem; color: var(--muted); }
+footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+@media (max-width: 880px) {
+  .split, .turn { grid-template-columns: minmax(0, 1fr); }
+  .feats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  body { font-size: 16px; }
+  .feats, .steps { grid-template-columns: minmax(0, 1fr); }
+  .lens { padding-left: 16px; }
+  .row { grid-template-columns: 2rem minmax(0, 1fr); }
+  section.band { padding-block: 48px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .row { transition: none; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="mark" href="#top" id="top"><span class="k">keep</span>/<span class="u">undo</span> <span class="rest">for Claude Code</span></a>
+    <nav aria-label="Page">
+      <a href="#editor">In the editor</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/JiachengZhao98/keep-undo-for-claude-code">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <div class="hunk" id="hunk" data-state="">
+        <div class="hunk-head"><span class="file">how-you-review.md</span><span>· 1 change from Claude</span></div>
+        <div class="lens" id="lens">
+          <span class="acts">
+            <button type="button" data-act="keep">✓ Keep</button><span class="sep">|</span><button type="button" data-act="undo">↺ Undo</button><span class="meta">Claude 1/1 · +1 −1 · try it</span>
+          </span>
+          <span class="done" hidden><span id="done-text"></span> <button type="button" data-act="reset">Show the change again</button></span>
+        </div>
+        <div class="rows">
+          <div class="row del" aria-hidden="true"><span class="ln" id="del-ln"></span><p class="hero-line">Accept the whole turn and hope for the best.</p></div>
+          <div class="row add"><span class="ln">1</span><h1 class="hero-line">Keep or undo every change Claude makes, one at a time.</h1></div>
+        </div>
+      </div>
+
+      <p class="lede">A VS Code extension for Claude Code. Every file Claude edits gets Copilot-style review: green for what it added, red for what it removed, and <strong>Keep</strong> or <strong>Undo</strong> on each change. <span class="muted">Claude writes to disk as usual; you review when you're ready.</span></p>
+      <div class="ctas">
+        <a class="btn primary" href="https://github.com/JiachengZhao98/keep-undo-for-claude-code">View on GitHub</a>
+        <a class="btn secondary" href="#install">Install</a>
+        <span class="req">VS Code 1.140+ · Claude Code · Node.js · MIT license</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="editor">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="eyebrow">In the editor</span>
+        <h2>Every change shows up where it happened</h2>
+        <p>Open a file Claude touched and its changes are already marked. Nothing to switch to, no separate diff to hunt for.</p>
+      </div>
+      <div class="split">
+        <figure class="editor" aria-label="A file with two pending changes from Claude">
+          <div class="tabs"><span class="tab">cart.ts <span class="dot">●</span></span></div>
+          <div class="code">
+<div class="l"><span class="n">7</span><span class="c"></span></div>
+<div class="l"><span class="n">8</span><span class="c"><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: Item[]): <span class="kw">number</span> {</span></div>
+<div class="l cl"><span class="n"></span><span class="c"><b>✓ Keep</b> | <b>↺ Undo</b> | <b>Ask Claude</b> | Claude 1/2 · +2 −1 · "Fix the total for an emp…"</span></div>
+<div class="l del"><span class="n"></span><span class="c">  <span class="kw">return</span> items.reduce((sum, i) =&gt; sum + i.price * i.qty);</span></div>
+<div class="l add"><span class="n">9</span><span class="c">  <span class="kw">if</span> (items.length === <span class="st">0</span>) <span class="kw">return</span> <span class="st">0</span>;</span></div>
+<div class="l add"><span class="n">10</span><span class="c">  <span class="kw">return</span> items.reduce((sum, i) =&gt; sum + i.price * i.qty, <span class="st">0</span>);</span></div>
+<div class="l"><span class="n">11</span><span class="c">}</span></div>
+<div class="l"><span class="n">12</span><span class="c"></span></div>
+<div class="l"><span class="n">13</span><span class="c"><span class="kw">export function</span> <span class="fn">formatPrice</span>(cents: <span class="kw">number</span>): <span class="kw">string</span> {</span></div>
+<div class="l cl"><span class="n"></span><span class="c"><b>✓ Keep</b> | <b>↺ Undo</b> | <b>Ask Claude</b> | Claude 2/2 · −1 · "Fix the total for an emp…"</span></div>
+<div class="l del"><span class="n"></span><span class="c">  <span class="cm">// TODO: support other currencies</span></span></div>
+<div class="l"><span class="n">14</span><span class="c">  <span class="kw">return</span> <span class="st">`$${(cents / 100).toFixed(2)}`</span>;</span></div>
+<div class="l"><span class="n">15</span><span class="c">}</span></div>
+          </div>
+        </figure>
+        <div class="aside">
+        <dl class="notes">
+          <div><dt><span class="swatch add"></span>Green lines</dt><dd>What Claude added, with a bar in the gutter and a mark on the scrollbar.</dd></div>
+          <div><dt><span class="swatch del"></span>Red lines</dt><dd>What Claude removed, drawn right where it was, with the same syntax colors as your theme. They aren't part of the file.</dd></div>
+          <div><dt><span class="swatch lens"></span>Keep | Undo</dt><dd>Above every change. Undo is an ordinary edit, so <kbd>⌘Z</kbd> brings the change back. The label names the message of yours that produced it.</dd></div>
+        </dl>
+        <div class="keys"><span><kbd>⌃⌥K</kbd> Keep</span><span><kbd>⌃⌥U</kbd> Undo</span><span><kbd>⌃⌥N</kbd> <kbd>⌃⌥P</kbd> Next / previous</span><span><kbd>⌃⌥C</kbd> Ask Claude</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="turn">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="eyebrow">When Claude finishes</span>
+        <h2>A list of what changed, waiting for you</h2>
+        <p>At the end of each turn you get a summary of the files Claude changed. It stays on screen until you close it. Review opens the full list, with Keep and Undo on every file.</p>
+      </div>
+      <div class="turn">
+        <div>
+          <div class="toast" role="img" aria-label="Notification: Claude changed 3 files, with Review, Keep All and Undo All buttons">
+            <div class="toast-top">
+              <span class="toast-icon" aria-hidden="true">!</span>
+              <span>Claude changed 3 files: cart.ts, cart.test.ts, README.md</span>
+              <span class="toast-x" aria-hidden="true">×</span>
+            </div>
+            <div class="toast-src">Source: Claude Code Review (Keep/Undo)</div>
+            <div class="toast-btns"><span class="first">Review</span><span>Keep All</span><span>Undo All</span></div>
+          </div>
+          <p class="caption">Keep All and Undo All act on that turn only. Earlier changes you haven't reviewed stay in the list.</p>
+        </div>
+        <div>
+          <div class="tree" role="img" aria-label="The Claude Changes list in the Source Control sidebar">
+            <div class="tree-head">Claude Changes <span class="count">4</span> <span class="desc">3 files</span><span class="acts" aria-hidden="true">⧉ ✓✓ ✕✕ ···</span></div>
+            <div class="ti"><span class="tw">▾</span><span>cart.ts</span><span class="d">src  <span class="p">+2</span> <span class="m">−2</span></span></div>
+            <div class="ti child sel"><span>Lines 9–10</span><span class="d"><span class="p">+2</span> <span class="m">−1</span>  if (items.length === 0) return 0;</span><span class="hov">✓ ↺ Ask</span></div>
+            <div class="ti child"><span>Before line 14</span><span class="d"><span class="m">−1</span>  // TODO: support other currencies</span></div>
+            <div class="ti"><span class="tw">▸</span><span>cart.test.ts</span><span class="d">test  new</span></div>
+            <div class="ti"><span class="tw">▸</span><span>README.md</span><span class="d"><span class="p">+4</span></span></div>
+          </div>
+          <p class="caption">Click a file to jump to its first change, or a change to go straight to it. Group by prompt to see which message did what.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="features">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="eyebrow">What it covers</span>
+        <h2>Every way Claude changes a file</h2>
+      </div>
+      <dl class="feats">
+        <div><dt>Edits and shell commands</dt><dd>Edit, Write, MultiEdit and notebook edits, plus shell commands: the folders a command can touch are snapshotted before it runs and compared afterwards.</dd></div>
+        <div><dt>Your edits stay yours</dt><dd>What you type in a file under review, outside Claude's changes, is kept automatically. A file you save while a command runs isn't blamed on Claude.</dd></div>
+        <div><dt>Claude hears about it</dt><dd>Your next message tells Claude which changes you undid, so it doesn't quietly put them back.</dd></div>
+        <div><dt>Grouped by prompt</dt><dd>See which of your messages produced each change, open one prompt's diff, or keep and undo a whole prompt at once.</dd></div>
+        <div><dt>Ask Claude about a change</dt><dd>Send one change back to Claude Code with its location and the original code already filled in, in the session that made it.</dd></div>
+        <div><dt>New, deleted and binary files</dt><dd>A file Claude created can be kept or deleted; a file it removed can be restored. Large and binary files are handled as a whole.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="band" id="how">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="eyebrow">How it works</span>
+        <h2>A baseline for every file Claude touches</h2>
+      </div>
+      <ol class="steps">
+        <li><h3>Claude edits a file</h3><p>A Claude Code hook saves the file's content from before that first edit, its baseline, to <code>~/.cc-review</code>.</p></li>
+        <li><h3>The extension compares</h3><p>VS Code diffs the baseline against the file and draws each difference as a change.</p></li>
+        <li><h3>You decide</h3><p>Keep moves a change into the baseline. Undo puts the original lines back into the file.</p></li>
+        <li><h3>The file leaves the list</h3><p>Once the file matches its baseline again, there's nothing left to review.</p></li>
+      </ol>
+      <p class="rule"><strong>The whole model in one rule:</strong> a file is pending as long as it differs from its baseline. That's why a <code>git checkout</code>, a Claude Code rewind or changing the lines back by hand all clear it too.</p>
+    </div>
+  </section>
+
+  <section class="band" id="install">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="eyebrow">Install</span>
+        <h2>Three steps, about five minutes</h2>
+        <p>You need VS Code 1.140 or later (the regular release, not Insiders), Node.js and Claude Code.</p>
+      </div>
+      <ol class="install">
+        <li>
+          <h3>Build and install the extension</h3>
+          <div class="snippet"><pre id="s1">git clone https://github.com/JiachengZhao98/keep-undo-for-claude-code.git
+cd keep-undo-for-claude-code/cc-review
+npm install
+npm run package
+code --install-extension cc-review-0.3.0.vsix</pre><button class="copy" type="button" data-copy="s1">Copy</button></div>
+        </li>
+        <li>
+          <h3>Allow the inline red lines</h3>
+          <p>Run <strong>Preferences: Configure Runtime Arguments</strong>, add this line to <code>argv.json</code>, then quit and reopen VS Code. Without it, deleted lines show on hover instead.</p>
+          <div class="snippet"><pre id="s2">"enable-proposed-api": ["local.cc-review"]</pre><button class="copy" type="button" data-copy="s2">Copy</button></div>
+        </li>
+        <li>
+          <h3>Install the hooks</h3>
+          <p>The extension offers this on first start, or run <strong>Claude Review: Install Claude Code Hooks</strong>. You see the exact change to <code>~/.claude/settings.json</code> before anything is written, and the original is backed up.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>MIT license · <a href="https://github.com/JiachengZhao98/keep-undo-for-claude-code">github.com/JiachengZhao98/keep-undo-for-claude-code</a></span>
+    <span>An independent project, not made by Anthropic or Microsoft.</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const hunk = document.getElementById('hunk');
+  const acts = hunk.querySelector('.acts');
+  const done = hunk.querySelector('.done');
+  const doneText = document.getElementById('done-text');
+  const delLn = document.getElementById('del-ln');
+  hunk.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'reset') {
+      hunk.dataset.state = '';
+      delLn.textContent = '';
+      acts.hidden = false;
+      done.hidden = true;
+      acts.querySelector('button').focus();
+      return;
+    }
+    hunk.dataset.state = act === 'keep' ? 'kept' : 'undone';
+    delLn.textContent = act === 'undo' ? '1' : '';
+    doneText.textContent = act === 'keep' ? 'Kept. Nothing left to review.' : 'Undone. The original line is back.';
+    acts.hidden = true;
+    done.hidden = false;
+    done.querySelector('button').focus();
+  });
+
+  document.querySelectorAll('button[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const pre = document.getElementById(btn.dataset.copy);
+      const selectIt = () => {
+        const r = document.createRange();
+        r.selectNodeContents(pre);
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        btn.textContent = 'Selected';
+      };
+      try {
+        navigator.clipboard.writeText(pre.textContent).then(() => { btn.textContent = 'Copied'; }, selectIt);
+      } catch {
+        selectIt();
+      }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+})();
+</script>
+</body>
+</html>
