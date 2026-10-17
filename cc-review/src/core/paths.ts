@@ -10,6 +10,8 @@ export interface Layout {
   staging: string; // Original content staged by PreToolUse; promoted to a baseline on PostToolUse
   reported: string; // <session>.json: reverts already reported to that session
   rounds: string; // <prompt_id>/: before/after snapshots of each file changed in that round (one user message)
+  snapshots: string; // Folder states and file contents from before shell commands, to find what a command changed
+  userSaves: string; // Appended by the extension: one line per file saved in VS Code, so the hook does not blame Claude for it
   events: string; // Appended by the hook: one line per Claude write
   reverts: string; // Appended by the extension: one line per Undo
   hookLog: string;
@@ -28,6 +30,8 @@ export function layoutOf(root = reviewRoot()): Layout {
     staging: path.join(root, 'staging'),
     reported: path.join(root, 'reported'),
     rounds: path.join(root, 'rounds'),
+    snapshots: path.join(root, 'snapshots'),
+    userSaves: path.join(root, 'user-saves.jsonl'),
     events: path.join(root, 'events.jsonl'),
     reverts: path.join(root, 'reverts.jsonl'),
     hookLog: path.join(root, 'hook.log'),
@@ -37,7 +41,7 @@ export function layoutOf(root = reviewRoot()): Layout {
 }
 
 export function ensureLayout(L: Layout): void {
-  for (const dir of [L.root, L.baselines, L.staging, L.reported, L.rounds]) fs.mkdirSync(dir, { recursive: true });
+  for (const dir of [L.root, L.baselines, L.staging, L.reported, L.rounds, L.snapshots]) fs.mkdirSync(dir, { recursive: true });
 }
 
 export function pathKey(p: string): string {

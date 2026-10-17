@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { writeAtomic } from '../core/fsutil';
 import type { Layout } from '../core/paths';
-import { addOurHooks, detectIndent, ourHooksInstalled, removeOurHooks } from './hookConfig';
+import { addOurHooks, detectIndent, ourHookStatus, removeOurHooks, type HookStatus } from './hookConfig';
 
 export const PREVIEW_SCHEME = 'cc-review-preview';
 
@@ -28,11 +28,11 @@ function readSettings(file: string): { text: string; json: Record<string, unknow
   return { text, json: json as Record<string, unknown> };
 }
 
-export function hooksInstalled(L: Layout): boolean {
+export function hookStatus(L: Layout, trackBash: boolean): HookStatus {
   try {
-    return ourHooksInstalled(readSettings(claudeSettingsPath()).json, L.hookScript);
+    return ourHookStatus(readSettings(claudeSettingsPath()).json, L.hookScript, trackBash);
   } catch {
-    return false;
+    return 'missing';
   }
 }
 
@@ -117,19 +117,36 @@ export async function installHooks(L: Layout, preview: PreviewProvider): Promise
     void vscode.window.showErrorMessage('Could not find node. Set the ccReview.nodePath setting to the absolute path of node.');
     return false;
   }
-  const trackBash = vscode.workspace.getConfiguration('ccReview').get<boolean>('trackBash') ?? false;
+  const trackBash = vscode.workspace.getConfiguration('ccReview').get<boolean>('trackBash') ?? true;
+  const updating = ourHookStatus(current.json, L.hookScript, trackBash) !== 'missing';
   const next = addOurHooks(current.json, { node, script: L.hookScript, trackBash });
   const newText = JSON.stringify(next, null, detectIndent(current.text)) + '\n';
-  const ok = await applyChange(
-    preview,
-    file,
-    current.text,
-    newText,
-    'settings.json ↔ After Installing Claude Review Hooks',
-    `Add ${trackBash ? 5 : 3} hooks to your Claude Code settings?`,
-    'Install',
-  );
-  if (ok) void vscode.window.showInformationMessage('Hooks installed. Claude Code picks up the new settings automatically; files Claude edits from now on will appear under "Claude Changes".');
+  const ok = updating
+    ? await applyChange(
+        preview,
+        file,
+        current.text,
+        newText,
+        'settings.json ↔ After Updating Claude Review Hooks',
+        'Update the Claude Review hooks in your Claude Code settings?',
+        'Update',
+      )
+    : await applyChange(
+        preview,
+        file,
+        current.text,
+        newText,
+        'settings.json ↔ After Installing Claude Review Hooks',
+        `Add ${trackBash ? 6 : 4} hooks to your Claude Code settings?`,
+        'Install',
+      );
+  if (ok) {
+    void vscode.window.showInformationMessage(
+      updating
+        ? 'Hooks updated. Claude Code picks up the new settings automatically.'
+        : 'Hooks installed. Claude Code picks up the new settings automatically; files Claude edits from now on will appear under "Claude Changes".',
+    );
+  }
   return ok;
 }
 

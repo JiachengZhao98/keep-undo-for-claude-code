@@ -2,7 +2,7 @@
   "name": "cc-review",
   "displayName": "Claude Code Review (Keep/Undo)",
   "description": "Keep or undo Claude Code's file edits change by change, like Copilot",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -394,6 +394,16 @@
           "default": false,
           "description": "Also show files outside the current workspace that Claude changed."
         },
+        "ccReview.summaryWhenClaudeFinishes": {
+          "type": "boolean",
+          "default": true,
+          "description": "When Claude finishes responding and the turn left changes to review, show a notification listing the changed files, with buttons to review them or keep or undo all of them."
+        },
+        "ccReview.keepSummaryOnScreen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep the end-of-turn summary on screen until you close it. VS Code only does this for error notifications, so the summary is shown as one, with an error icon. Turn this off for a regular notification that hides after 10 seconds."
+        },
         "ccReview.codeLens": {
           "type": "boolean",
           "default": true,
@@ -406,8 +416,8 @@
         },
         "ccReview.trackBash": {
           "type": "boolean",
-          "default": false,
-          "description": "(Experimental) Also hook Bash: in git repositories, take a snapshot with git stash create to capture files that Bash commands change. Adds tens to hundreds of milliseconds to each Bash command. Run \"Install Claude Code Hooks\" again after changing this."
+          "default": true,
+          "description": "Also track files Claude changes through shell commands (Bash). The folders a command may touch (its starting directory, the project, every cd target and every path it names) are snapshotted before it runs and compared afterwards; inside git repositories this uses git. In a folder outside git with more than 10,000 files, only the files a command names are tracked. Read-only commands such as ls, grep and git status are skipped. Run \"Install Claude Code Hooks\" again after changing this."
         },
         "ccReview.syntaxHighlight": {
           "type": "boolean",

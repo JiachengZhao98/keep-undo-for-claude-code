@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addOurHooks, detectIndent, ourHooksInstalled, removeOurHooks } from '../../src/install/hookConfig';
+import { addOurHooks, detectIndent, ourHookStatus, removeOurHooks } from '../../src/install/hookConfig';
 
 const SCRIPT = '/Users/me/.cc-review/hook.js';
 const spec = { node: '/opt/homebrew/bin/node', script: SCRIPT, trackBash: false };
@@ -15,21 +15,31 @@ const existing = {
 };
 
 describe('hook config merging', () => {
-  it('appends only our three hooks and leaves existing hooks and settings alone', () => {
+  it('appends only our four hooks and leaves existing hooks and settings alone', () => {
     const out = addOurHooks(existing, spec);
     expect(out.model).toBe('opus');
     expect(out.hooks.PreToolUse).toHaveLength(2);
     expect(out.hooks.PreToolUse[0]).toEqual(existing.hooks.PreToolUse[0]);
     expect(out.hooks.PreToolUse[1]).toEqual({
-      matcher: 'Edit|Write|MultiEdit',
+      matcher: 'Edit|Write|MultiEdit|NotebookEdit',
       hooks: [{ type: 'command', command: '/opt/homebrew/bin/node', args: [SCRIPT, 'pre'], timeout: 10 }],
     });
     expect(out.hooks.PostToolUse).toHaveLength(1);
     expect(out.hooks.UserPromptSubmit).toHaveLength(2);
     expect(out.hooks.UserPromptSubmit[1].matcher).toBeUndefined();
+    expect(out.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: '/opt/homebrew/bin/node', args: [SCRIPT, 'stop'], timeout: 10 }] }]);
     expect(out.hooks.SessionEnd).toEqual(existing.hooks.SessionEnd);
-    expect(ourHooksInstalled(out, SCRIPT)).toBe(true);
-    expect(ourHooksInstalled(existing, SCRIPT)).toBe(false);
+    expect(ourHookStatus(out, SCRIPT, false)).toBe('current');
+    expect(ourHookStatus(existing, SCRIPT, false)).toBe('missing');
+  });
+
+  it('reports hooks installed before the Stop hook existed as outdated, and updating adds only that hook', () => {
+    const old = addOurHooks(existing, spec);
+    delete old.hooks.Stop;
+    expect(ourHookStatus(old, SCRIPT, false)).toBe('outdated');
+    const updated = addOurHooks(old, spec);
+    expect(ourHookStatus(updated, SCRIPT, false)).toBe('current');
+    expect({ ...updated.hooks, Stop: undefined }).toEqual({ ...old.hooks, Stop: undefined });
   });
 
   it('is idempotent', () => {
@@ -50,8 +60,18 @@ describe('hook config merging', () => {
 
   it('adds two Bash hooks with trackBash', () => {
     const out = addOurHooks({}, { ...spec, trackBash: true });
-    expect(out.hooks.PreToolUse.map((g: { matcher: string }) => g.matcher)).toEqual(['Edit|Write|MultiEdit', 'Bash']);
+    expect(out.hooks.PreToolUse.map((g: { matcher: string }) => g.matcher)).toEqual(['Edit|Write|MultiEdit|NotebookEdit', 'Bash']);
+    expect(ourHookStatus(out, SCRIPT, true)).toBe('current');
     expect(removeOurHooks(out, SCRIPT)).toEqual({});
+  });
+
+  it('reports hooks as outdated when Bash tracking is on but its hooks are missing, or the Edit matcher is older', () => {
+    const withoutBash = addOurHooks({}, spec);
+    expect(ourHookStatus(withoutBash, SCRIPT, false)).toBe('current');
+    expect(ourHookStatus(withoutBash, SCRIPT, true)).toBe('outdated');
+    const oldMatcher = structuredClone(withoutBash);
+    oldMatcher.hooks.PreToolUse[0].matcher = 'Edit|Write|MultiEdit';
+    expect(ourHookStatus(oldMatcher, SCRIPT, false)).toBe('outdated');
   });
 
   it("keeps the file's indentation", () => {

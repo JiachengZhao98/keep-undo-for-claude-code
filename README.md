@@ -14,7 +14,7 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
    cd cc-review
    npm install
    npm run package
-   code --install-extension cc-review-0.1.0.vsix
+   code --install-extension cc-review-0.3.0.vsix
    ```
 
 2. Allow the proposed API: run **Preferences: Configure Runtime Arguments** from the Command Palette, add this line to `argv.json`, then quit VS Code completely and reopen it:
@@ -25,9 +25,15 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
 
    Without it the extension still works, but deleted lines are only marked in the gutter and shown on hover.
 
-3. Install the hooks: the extension offers this on first start, or run **Claude Review: Install Claude Code Hooks** from the Command Palette. It first shows a diff of the change to `~/.claude/settings.json` and writes only after you confirm. It only appends 3 hooks, leaves your existing settings alone, and backs up the original file as `settings.json.cc-review.bak`. Claude Code picks up the change automatically.
+3. Install the hooks: the extension offers this on first start, or run **Claude Review: Install Claude Code Hooks** from the Command Palette. It first shows a diff of the change to `~/.claude/settings.json` and writes only after you confirm. It only appends 6 hooks, leaves your existing settings alone, and backs up the original file as `settings.json.cc-review.bak`. Claude Code picks up the change automatically.
 
 ## Usage
+
+When Claude finishes responding, a notification lists the files it changed in that turn: **Review** opens the Claude Changes view (in the Source Control sidebar) and the first changed file; **Keep All** / **Undo All** act on that turn's changes. It stays on screen until you close it; VS Code only keeps error notifications on screen, so it carries an error icon (turn off `ccReview.keepSummaryOnScreen` for a regular notification that hides after 10 seconds). The status bar item "Claude: N files · M changes" and the Claude Changes view show everything still pending at any time.
+
+Every way Claude changes files is tracked: the Edit, Write, MultiEdit and NotebookEdit tools, and shell commands. Before a shell command runs, the folders it may touch are snapshotted (its starting directory, the project, every `cd` target and every path it names) and compared with the result afterwards. Inside a git repository this uses git, so only untracked files are copied. A folder outside git with more than 10,000 files is only tracked for the files a command names. Read-only commands such as `ls`, `grep` and `git status` are skipped. A file you save in VS Code while a command runs counts as yours, not Claude's.
+
+Not tracked: files outside those folders, changes a background command makes after it starts, files git ignores or in generated folders (`node_modules`, `dist`, `build` and the like), and files over 1 MB outside git.
 
 | Action | How |
 | --- | --- |
@@ -59,11 +65,13 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
 | `ccReview.maxInsetsPerEditor` | `20` | Maximum number of phantom line insets in one editor at a time |
 | `ccReview.maxFileSizeKB` | `1024` | Larger files can only be kept or undone as a whole |
 | `ccReview.showFilesOutsideWorkspace` | `false` | Also show files outside the workspace that Claude changed |
+| `ccReview.summaryWhenClaudeFinishes` | `true` | When Claude finishes responding, list the files it changed, with Review / Keep All / Undo All |
+| `ccReview.keepSummaryOnScreen` | `true` | Keep that summary on screen until you close it (shown with an error icon, the only kind VS Code keeps) |
 | `ccReview.codeLens` | `true` | Show Keep \| Undo above each change |
 | `ccReview.syntaxHighlight` | `true` | Syntax-highlight phantom lines with the active theme |
 | `ccReview.groupBy` | `file` | Group the Claude Changes view by file (`file`) or by prompt (`round`) |
 | `ccReview.nodePath` | auto | Absolute path of the node the hooks run with |
-| `ccReview.trackBash` | `false` | (Experimental) Also capture files changed by Bash commands; reinstall the hooks after changing it |
+| `ccReview.trackBash` | `true` | Also track files changed by shell commands; reinstall the hooks after changing it |
 
 To keep files from being copied into `~/.cc-review/`, list them in `~/.cc-review/.ccreviewignore` (global) or in a `.ccreviewignore` in your project, using `.gitignore` syntax. `.env`, `*.pem`, `*.key` and similar files are ignored by default.
 
@@ -77,9 +85,12 @@ Claude Code ──hook.js──▶ ~/.cc-review/ ◀──watches── VS Code 
 
 | Hook | What it does |
 | --- | --- |
-| `PreToolUse(Edit\|Write\|MultiEdit)` | Stages the file's current content in `staging/<tool_use_id>` |
-| `PostToolUse(Edit\|Write\|MultiEdit)` | After a successful write, turns the staged content into the baseline if the file has none yet (first touch); appends a write event |
+| `PreToolUse(Edit\|Write\|MultiEdit\|NotebookEdit)` | Stages the file's current content in `staging/<tool_use_id>` |
+| `PostToolUse(Edit\|Write\|MultiEdit\|NotebookEdit)` | After a successful write, turns the staged content into the baseline if the file has none yet (first touch); appends a write event |
+| `PreToolUse(Bash)` | Snapshots the folders the command may change (skipped for read-only commands) |
+| `PostToolUse(Bash)` | Compares them with the snapshot and takes a baseline for every file the command changed, created or deleted |
 | `UserPromptSubmit` | Records the prompt for this round; prints this session's unreported Undo records to stdout, which Claude receives as context |
+| `Stop` | Appends a turn-end event, which the extension turns into the summary of this turn's changes |
 
 Within each round (one `prompt_id`), Post also keeps two snapshots of every file it changes: before the round's first write and after its last write. The extension walks the snapshot chain back from the current content to work out which prompt introduced each change.
 
@@ -89,6 +100,8 @@ Within each round (one `prompt_id`), Post also keeps two snapshots of every file
   .ccreviewignore     global ignore rules
   baselines/<sha1(path)>.json / .base   baseline metadata and content
   staging/            original content staged by Pre, removed after Post
+  snapshots/          folder states and file contents from before shell commands
+  user-saves.jsonl    files saved in VS Code in the last hour, so a save during a command is not blamed on Claude
   events.jsonl        one line per write by Claude
   reverts.jsonl       one line per Undo
   reported/           Undo records already reported, per session
@@ -96,7 +109,7 @@ Within each round (one `prompt_id`), Post also keeps two snapshots of every file
   hook.log            hook error log
 ```
 
-The hooks always exit 0 and never print JSON, so they never affect Claude Code's permission decisions. Each edit runs two extra node processes of about 50 ms each.
+The hooks always exit 0 and never print JSON, so they never affect Claude Code's permission decisions. Each edit runs two extra node processes of about 50 ms each, each turn one more, and each shell command that may write about 100 ms before and after it.
 
 Prompt text is stored only on your machine, in `~/.cc-review/rounds/` (Claude Code keeps its own transcripts locally too). A round is deleted once it is more than a day old and none of its files are pending, or once it is more than 7 days old.
 
