@@ -11,6 +11,25 @@ export interface HookSpec {
 
 type Settings = Record<string, any>;
 
+/** The tools that write files by path */
+export const EDIT_MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
+
+/** Our hooks: event, matcher, hook.js mode */
+function ourHookList(trackBash: boolean): Array<[event: string, matcher: string | undefined, mode: string]> {
+  return [
+    ['PreToolUse', EDIT_MATCHER, 'pre'],
+    ['PostToolUse', EDIT_MATCHER, 'post'],
+    ['UserPromptSubmit', undefined, 'prompt'],
+    ['Stop', undefined, 'stop'],
+    ...(trackBash
+      ? ([
+          ['PreToolUse', 'Bash', 'bash-pre'],
+          ['PostToolUse', 'Bash', 'bash-post'],
+        ] as Array<[string, string, string]>)
+      : []),
+  ];
+}
+
 /** Recognize our own entries by the hook.js path */
 export function isOurHook(h: unknown, script: string): boolean {
   if (!h || typeof h !== 'object') return false;
@@ -46,31 +65,34 @@ export function removeOurHooks(settings: Settings | undefined, script: string): 
 export function addOurHooks(settings: Settings | undefined, spec: HookSpec): Settings {
   const out = removeOurHooks(settings, spec.script);
   if (!out.hooks || typeof out.hooks !== 'object' || Array.isArray(out.hooks)) out.hooks = {};
-  const cmd = (mode: string) => ({ type: 'command', command: spec.node, args: [spec.script, mode], timeout: 10 });
-  const add = (event: string, group: object) => {
+  for (const [event, matcher, mode] of ourHookList(spec.trackBash)) {
     if (!Array.isArray(out.hooks[event])) out.hooks[event] = [];
-    out.hooks[event].push(group);
-  };
-  add('PreToolUse', { matcher: 'Edit|Write|MultiEdit', hooks: [cmd('pre')] });
-  add('PostToolUse', { matcher: 'Edit|Write|MultiEdit', hooks: [cmd('post')] });
-  add('UserPromptSubmit', { hooks: [cmd('prompt')] });
-  if (spec.trackBash) {
-    add('PreToolUse', { matcher: 'Bash', hooks: [cmd('bash-pre')] });
-    add('PostToolUse', { matcher: 'Bash', hooks: [cmd('bash-post')] });
+    const hook = { type: 'command', command: spec.node, args: [spec.script, mode], timeout: 10 };
+    out.hooks[event].push(matcher === undefined ? { hooks: [hook] } : { matcher, hooks: [hook] });
   }
   return out;
 }
 
-/** Installed only when all three required hooks are present */
-export function ourHooksInstalled(settings: Settings | undefined, script: string): boolean {
+/**
+ * missing: the hooks that record Claude's edits are not all there.
+ * outdated: they are, but not exactly as this version installs them (e.g. no Stop hook, the Edit
+ * matcher without NotebookEdit, or no Bash hooks while ccReview.trackBash is on).
+ */
+export type HookStatus = 'missing' | 'outdated' | 'current';
+
+export function ourHookStatus(settings: Settings | undefined, script: string, trackBash: boolean): HookStatus {
   const hooks = settings?.hooks;
-  if (!hooks || typeof hooks !== 'object') return false;
-  const has = (event: string, mode: string) =>
+  if (!hooks || typeof hooks !== 'object') return 'missing';
+  const has = (event: string, mode: string, matcher?: string | null) =>
     Array.isArray(hooks[event]) &&
     hooks[event].some(
-      (g: any) => Array.isArray(g?.hooks) && g.hooks.some((h: any) => isOurHook(h, script) && Array.isArray(h.args) && h.args.includes(mode)),
+      (g: any) =>
+        Array.isArray(g?.hooks) &&
+        (matcher === null || g.matcher === matcher) &&
+        g.hooks.some((h: any) => isOurHook(h, script) && Array.isArray(h.args) && h.args.includes(mode)),
     );
-  return has('PreToolUse', 'pre') && has('PostToolUse', 'post') && has('UserPromptSubmit', 'prompt');
+  if (!(has('PreToolUse', 'pre', null) && has('PostToolUse', 'post', null) && has('UserPromptSubmit', 'prompt', null))) return 'missing';
+  return ourHookList(trackBash).every(([event, matcher, mode]) => has(event, mode, matcher)) ? 'current' : 'outdated';
 }
 
 export function detectIndent(text: string): string | number {

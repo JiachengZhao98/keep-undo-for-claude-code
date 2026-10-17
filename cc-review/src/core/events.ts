@@ -1,4 +1,4 @@
-// EventWatcher: reads events.jsonl incrementally and watches the baselines/ directory.
+// EventWatcher: reads events.jsonl (Claude's writes and turn ends) incrementally and watches the baselines/ directory.
 // Baseline changes come from the hook's Post (new baselines) and from Keep / cleanup in other windows,
 // which keeps multiple windows consistent.
 import * as fs from 'node:fs';
@@ -15,6 +15,16 @@ export interface WriteEvent {
   toolUseId?: string;
   ts: number;
 }
+
+/** Written by the Stop hook when Claude finishes responding to a message */
+export interface TurnEndEvent {
+  type: 'turn-end';
+  session?: string;
+  prompt?: string;
+  ts: number;
+}
+
+type StoreEvent = WriteEvent | TurnEndEvent;
 
 export class JsonlTail {
   private offset = 0;
@@ -63,6 +73,8 @@ export class JsonlTail {
 export interface WatcherCallbacks {
   onEvents(events: WriteEvent[]): void;
   onBaselinesChanged(): void;
+  /** Only for turns that end while the watcher runs, not for the ones already in the log at start */
+  onTurnEnd?(event: TurnEndEvent): void;
 }
 
 export class StoreWatcher {
@@ -72,6 +84,7 @@ export class StoreWatcher {
   private debounce: NodeJS.Timeout | undefined;
   private lastDirStamp = '';
   private disposed = false;
+  private started = false;
 
   constructor(
     private readonly L: Layout,
@@ -84,6 +97,7 @@ export class StoreWatcher {
   start(): void {
     // Drain past events first (to learn which sessions edited each file)
     this.drain();
+    this.started = true;
     const watch = (dir: string) => {
       try {
         const w = fs.watch(dir, { persistent: false }, () => this.schedule());
@@ -127,9 +141,11 @@ export class StoreWatcher {
   private drain(): void {
     if (this.disposed) return;
     this.lastDirStamp = this.dirStamp();
-    const events = this.tail.readNew<WriteEvent>().filter((e) => e && e.type === 'claude-write' && typeof e.path === 'string');
+    const all = this.tail.readNew<StoreEvent>();
+    const events = all.filter((e): e is WriteEvent => e?.type === 'claude-write' && typeof e.path === 'string');
     if (events.length) this.cb.onEvents(events);
     this.cb.onBaselinesChanged();
+    if (this.started) for (const e of all) if (e?.type === 'turn-end') this.cb.onTurnEnd?.(e);
   }
 
   dispose(): void {

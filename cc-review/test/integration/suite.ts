@@ -365,6 +365,20 @@ test('Undo records reach the UserPromptSubmit hook (real hook.js)', async () => 
   assert.match(out, /new/);
 });
 
+test('a file changed by a shell command becomes pending (real hook.js)', async () => {
+  const p = path.join(WS, 'shell/edited.txt');
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, 'keep\nbefore\n');
+  const input = { session_id: 'it-session', prompt_id: 'it-shell', cwd: path.dirname(p), tool_name: 'Bash', tool_use_id: 'it-bash-1', tool_input: { command: './fix.sh' } };
+  const hook = (mode: string) =>
+    execFileSync(process.execPath, [L.hookScript, mode], { input: JSON.stringify(input), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CLAUDE_PROJECT_DIR: '' } });
+  hook('bash-pre');
+  fs.writeFileSync(p, 'keep\nafter\n');
+  hook('bash-post');
+  const pf = await pending(p, 1);
+  assert.deepEqual(pf.hunks[0].removed, ['before']);
+});
+
 test('Keep All / Undo All (model level, no confirmation dialog)', async () => {
   const a = claudeWrites('all/a.ts', 'a\n', 'A\n');
   const b = claudeWrites('all/b.ts', 'b\n', 'B\n');
@@ -488,6 +502,42 @@ test('CodeLens shows which round each hunk came from', async () => {
     const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', ed.document.uri);
     return lenses.some((l) => l.command?.title.includes('"Add a line to lens.ts"'));
   });
+});
+
+test('when Claude finishes a turn, its pending changes are summarized in the order Claude wrote them', async () => {
+  const edited = path.join(WS, 'turn/edited.ts');
+  const created = path.join(WS, 'turn/NEW.md');
+  fs.mkdirSync(path.dirname(edited), { recursive: true });
+  fs.writeFileSync(edited, 'one\ntwo\n');
+  store.write({ path: edited, existed: true, ts: Date.now(), sessions: ['it-turn'] }, Buffer.from('one\ntwo\n'));
+  claudeRound(edited, 'it-turn-1', 'Edit a file and add a README', 'one\nTWO\n', 'it-turn');
+  await sleep(20);
+  store.write({ path: created, existed: false, ts: Date.now(), sessions: ['it-turn'] }, Buffer.alloc(0));
+  claudeRound(created, 'it-turn-1', 'Edit a file and add a README', '# New\n', 'it-turn');
+  await pending(edited, 1);
+  await waitFor('the new file to be pending', () => api.model.getFile(created));
+
+  appendJsonLine(L.events, { type: 'turn-end', session: 'it-turn', prompt: 'it-turn-1', ts: Date.now() });
+  const s = await waitFor('the end-of-turn summary', () => api.controller.lastTurnSummary?.roundId === 'it-turn-1' && api.controller.lastTurnSummary);
+  assert.deepEqual(s.files, [edited, created]);
+  assert.equal(s.changes.get(edited)?.length, 1);
+  assert.deepEqual(s.changes.get(created), []);
+  // Without a prompt_id, the session's latest round is used
+  assert.equal((await api.controller.turnSummary({ type: 'turn-end', session: 'it-turn', ts: Date.now() }))?.roundId, 'it-turn-1');
+
+  // Review opens the first file at its first change
+  await api.controller.reviewTurn(s);
+  const ed = await waitFor('the first changed file to open', () => {
+    const e = vscode.window.activeTextEditor;
+    return e && e.document.uri.fsPath === edited && e;
+  });
+  assert.equal(ed.selection.active.line, 1);
+
+  assert.equal(await api.controller.keepRound('it-turn-1'), 2);
+  await resolved(edited);
+  await resolved(created);
+  // Nothing left to review: no summary
+  assert.equal(await api.controller.turnSummary({ type: 'turn-end', session: 'it-turn', prompt: 'it-turn-1', ts: Date.now() }), undefined);
 });
 
 test('Ask Claude prefills the @-mention and original content and targets the session that introduced the hunk', async () => {

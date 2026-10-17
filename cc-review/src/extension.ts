@@ -4,14 +4,17 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { OwnEdits, PathIndex, Scope, VsEditApplier, VsTextSource } from './adapters';
 import type { Hunk } from './core/diff';
-import { StoreWatcher, type WriteEvent } from './core/events';
-import { writeAtomic } from './core/fsutil';
+import { StoreWatcher, type TurnEndEvent, type WriteEvent } from './core/events';
+import { appendJsonLine, readJsonLines, writeAtomic } from './core/fsutil';
 import { ReviewModel, type OpResult, type PendingFile } from './core/model';
-import { layoutOf, metaFile, type Layout } from './core/paths';
+import { canonical, layoutOf, metaFile, type Layout } from './core/paths';
 import { promptTitle, RoundStore } from './core/rounds';
+import { contentHash } from './core/snapshot';
 import { Store } from './core/store';
+import { turnSummaryMessage } from './core/summary';
 import { plural, splitLines } from './core/text';
-import { hooksInstalled, installHooks, PREVIEW_SCHEME, PreviewProvider, uninstallHooks } from './install/hooks';
+import type { HookStatus } from './install/hookConfig';
+import { hookStatus, installHooks, PREVIEW_SCHEME, PreviewProvider, uninstallHooks } from './install/hooks';
 import { buildAskPrompt, claudeInstalled, openClaude } from './ui/askClaude';
 import { HunkCodeLens } from './ui/codeLens';
 import { DecorationPainter } from './ui/decorations';
@@ -22,6 +25,15 @@ import { PhantomInsets, type InsetAction } from './ui/phantomInsets';
 import { OTHER_ROUND, ROUND_SCHEME, RoundService } from './ui/rounds';
 import { ReviewStatusBar } from './ui/statusBar';
 import { ChangesTree, type GroupMode, type ReviewNode } from './ui/tree';
+
+/** What Claude changed in one turn that is still pending */
+export interface TurnSummary {
+  roundId: string;
+  /** In the order Claude first wrote them */
+  files: string[];
+  /** file -> this turn's pending hunks (empty for whole-file changes such as a new file) */
+  changes: Map<string, string[]>;
+}
 
 /** Used by the integration tests */
 export interface CcReviewApi {
@@ -94,6 +106,9 @@ export class Controller implements vscode.Disposable {
   private readonly rangeTimers = new Map<vscode.TextEditor, NodeJS.Timeout>();
   private uiTimer: NodeJS.Timeout | undefined;
   private hooksOk = false;
+  private hookState: HookStatus = 'missing';
+  /** The last end-of-turn summary shown; read by the integration tests */
+  lastTurnSummary: TurnSummary | undefined;
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private readonly ctx: vscode.ExtensionContext) {
@@ -155,7 +170,10 @@ export class Controller implements vscode.Disposable {
       this.model.onDidChange((paths) => this.onModelChanged(paths)),
       this.insets.onDidBecomeUnavailable(() => this.renderAll()),
       vscode.workspace.onDidChangeTextDocument((e) => this.onDocChanged(e)),
-      vscode.workspace.onDidSaveTextDocument((doc) => this.onDocLifecycle(doc, 0)),
+      vscode.workspace.onDidSaveTextDocument((doc) => {
+        this.onDocLifecycle(doc, 0);
+        this.recordSave(doc);
+      }),
       vscode.workspace.onDidOpenTextDocument((doc) => {
         const p = this.idx.ofUri(doc.uri);
         if (p && this.model.getFile(p)) this.shadows.set(p, doc.getText());
@@ -191,6 +209,7 @@ export class Controller implements vscode.Disposable {
     this.watcher = new StoreWatcher(this.L, {
       onEvents: (evs) => this.onEvents(evs),
       onBaselinesChanged: () => void this.model.syncWithStore(),
+      onTurnEnd: (e) => void this.onTurnEnd(e),
     });
     this.watcher.start();
     await this.model.syncWithStore();
@@ -233,7 +252,8 @@ export class Controller implements vscode.Disposable {
   }
 
   private checkHooks(): void {
-    const ok = hooksInstalled(this.L);
+    this.hookState = hookStatus(this.L, cfg().get<boolean>('trackBash') ?? true);
+    const ok = this.hookState !== 'missing';
     if (ok !== this.hooksOk) {
       this.hooksOk = ok;
       this.scheduleUi();
@@ -242,14 +262,19 @@ export class Controller implements vscode.Disposable {
   }
 
   private async maybeOfferInstall(): Promise<void> {
-    if (this.hooksOk || this.ctx.globalState.get<boolean>('ccReview.dontAskInstall')) return;
-    const pick = await vscode.window.showInformationMessage(
-      'Claude Review needs to install hooks in ~/.claude/settings.json to record which files Claude changes.',
-      'Review and Install',
-      "Don't Ask Again",
-    );
-    if (pick === 'Review and Install') await this.runInstall();
-    else if (pick === "Don't Ask Again") await this.ctx.globalState.update('ccReview.dontAskInstall', true);
+    if (this.hookState === 'current') return;
+    const [key, message, action] =
+      this.hookState === 'missing'
+        ? ['ccReview.dontAskInstall', 'Claude Review needs to install hooks in ~/.claude/settings.json to record which files Claude changes.', 'Review and Install']
+        : [
+            'ccReview.dontAskUpdate.2',
+            'Claude Review needs to update its hooks in ~/.claude/settings.json to track every file Claude changes, including through shell commands, and to summarize each turn.',
+            'Review and Update',
+          ];
+    if (this.ctx.globalState.get<boolean>(key)) return;
+    const pick = await vscode.window.showInformationMessage(message, action, "Don't Ask Again");
+    if (pick === action) await this.runInstall();
+    else if (pick === "Don't Ask Again") await this.ctx.globalState.update(key, true);
   }
 
   private async runInstall(): Promise<void> {
@@ -264,6 +289,71 @@ export class Controller implements vscode.Disposable {
     this.roundService.invalidate();
     for (const p of this.model.noteEvents(events)) this.scheduleRefresh(p, 0);
     this.scheduleUi();
+  }
+
+  /** Tell the hook about files saved in VS Code, so a save during a shell command is not taken for Claude's change */
+  private recordSave(doc: vscode.TextDocument): void {
+    if (doc.uri.scheme !== 'file') return;
+    const ts = Date.now();
+    const file = doc.uri.fsPath;
+    fs.promises.readFile(file).then(
+      (data) => {
+        appendJsonLine(this.L.userSaves, { path: canonical(file), ts, hash: contentHash(data) });
+        // Only saves made during a running command matter: keep the last hour
+        if ((fs.statSync(this.L.userSaves, { throwIfNoEntry: false })?.size ?? 0) > 256 * 1024) {
+          const recent = readJsonLines<{ ts: number }>(this.L.userSaves).filter((r) => r.ts > ts - 3600_000);
+          writeAtomic(this.L.userSaves, recent.map((r) => JSON.stringify(r) + '\n').join(''));
+        }
+      },
+      () => undefined,
+    );
+  }
+
+  private async onTurnEnd(e: TurnEndEvent): Promise<void> {
+    if (!cfg().get<boolean>('summaryWhenClaudeFinishes', true)) return;
+    try {
+      const summary = await this.turnSummary(e);
+      if (!summary) return;
+      this.lastTurnSummary = summary;
+      const message = turnSummaryMessage(summary.files);
+      // VS Code keeps only error notifications on screen until they are closed
+      const pick = await (cfg().get<boolean>('keepSummaryOnScreen', true)
+        ? vscode.window.showErrorMessage(message, 'Review', 'Keep All', 'Undo All')
+        : vscode.window.showInformationMessage(message, 'Review', 'Keep All', 'Undo All'));
+      if (pick === 'Review') await this.reviewTurn(summary);
+      else if (pick === 'Keep All') await this.keepRound(summary.roundId);
+      else if (pick === 'Undo All') await this.undoRound(summary.roundId);
+    } catch (err) {
+      this.out.error(`End-of-turn summary failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    }
+  }
+
+  /** The changes from this turn that are still pending, or undefined if there are none */
+  async turnSummary(e: TurnEndEvent): Promise<TurnSummary | undefined> {
+    this.roundService.invalidate();
+    const roundId = e.prompt ?? this.rounds.all().find((r) => r.meta.session === e.session)?.meta.promptId;
+    const entry = roundId ? this.rounds.get(roundId) : undefined;
+    if (!roundId || !entry || entry.files.size === 0) return undefined;
+    // The Stop hook runs right after the turn's last write: let the model catch up first
+    await this.model.syncWithStore();
+    await Promise.all([...entry.files.values()].map((f) => this.model.refresh(f.path)));
+    const changes = this.roundService.group(this.scopeFiles()).find((g) => g.roundId === roundId)?.files ?? new Map<string, string[]>();
+    const firstWrite = new Map([...entry.files.values()].map((f) => [f.path, f.firstTs]));
+    const files = [...changes.keys()].sort((a, b) => (firstWrite.get(a) ?? 0) - (firstWrite.get(b) ?? 0));
+    return files.length ? { roundId, files, changes } : undefined;
+  }
+
+  /** Show the list of pending changes and open the turn's first changed file at its first change */
+  async reviewTurn(s: TurnSummary): Promise<void> {
+    const file = s.files.find((f) => this.model.getFile(f));
+    if (!file) {
+      void vscode.window.showInformationMessage('The changes from that turn have already been reviewed.');
+      return;
+    }
+    await vscode.commands.executeCommand('ccReview.changes.focus');
+    const hunk = s.changes.get(file)?.find((id) => this.model.getFile(file)?.hunks.some((h) => h.id === id));
+    if (hunk) await this.revealHunk(file, hunk);
+    else await this.openFile(file);
   }
 
   private onModelChanged(paths: string[]): void {
@@ -737,7 +827,7 @@ export class Controller implements vscode.Disposable {
   private dumpState(): void {
     this.out.info(`---- queue (${this.L.root}) ----\n${this.model.dump()}`);
     this.out.info(
-      `editorInsets ${this.insets.isAvailable ? 'available' : 'unavailable'}, ${this.insets.insetCount} insets now; hooks ${this.hooksOk ? 'installed' : 'not installed'}`,
+      `editorInsets ${this.insets.isAvailable ? 'available' : 'unavailable'}, ${this.insets.insetCount} insets now; hooks ${this.hookState}`,
     );
     for (const m of this.insets.metrics.slice(-5)) {
       this.out.info(`inset measured: ${m.lines} lines -> ${m.insetPx}px, ${m.linePx}px per line; font ${m.fontSize} ${m.fontFamily}`);

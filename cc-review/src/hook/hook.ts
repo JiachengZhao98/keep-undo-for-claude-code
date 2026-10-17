@@ -1,11 +1,12 @@
 // Run by Claude Code as a child process: must be fast, always exit 0, and pre/post never write to stdout.
 // Exit 0 with no output means "no decision", so the permission flow proceeds as usual.
 //
-//   pre        PreToolUse(Edit|Write): stage the file's current content in staging/<tool_use_id>
-//   post       PostToolUse(Edit|Write): if there is no baseline yet, promote the staged content to one; append a write event
+//   pre        PreToolUse(Edit|Write|MultiEdit|NotebookEdit): stage the file's current content in staging/<tool_use_id>
+//   post       PostToolUse(Edit|Write|MultiEdit|NotebookEdit): if there is no baseline yet, promote the staged content to one; append a write event
 //   prompt     UserPromptSubmit: print this session's unreported reverts to stdout as context for Claude
-//   bash-pre   PreToolUse(Bash), optional: snapshot with git stash create
-//   bash-post  PostToolUse(Bash), optional: find files the command changed and take baselines from the snapshot
+//   stop       Stop: append a turn-end event, so the extension can summarize what Claude changed in this turn
+//   bash-pre   PreToolUse(Bash): snapshot the folders the command may change
+//   bash-post  PostToolUse(Bash): find the files the command changed and take baselines from the snapshot
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -19,7 +20,8 @@ import {
   withLock,
   writeAtomic,
 } from '../core/fsutil';
-import { isIgnored } from '../core/ignore';
+import { analyzeCommand, type CommandInfo } from '../core/command';
+import { ignoreMatcher, isIgnored } from '../core/ignore';
 import {
   baseFile,
   canonical,
@@ -34,6 +36,23 @@ import {
 } from '../core/paths';
 import { formatRevertReport, type RevertLine, type RevertRecord } from '../core/reverts';
 import { recordPrompt, recordRoundWrite } from '../core/rounds';
+import {
+  captureFile,
+  captureFiles,
+  changed,
+  contentHash,
+  diffFolder,
+  gcSnapshots,
+  isTooBig,
+  listFolder,
+  loadIndex,
+  MAX_FOLDER_FILES,
+  readObject,
+  saveIndex,
+  SNAPSHOT_EXCLUDES,
+  type Entry,
+  type FileChange,
+} from '../core/snapshot';
 import { contentEqual } from '../core/text';
 
 interface HookInput {
@@ -61,13 +80,6 @@ interface BaselineMeta {
   sessions?: string[];
 }
 
-interface BashSnapshot {
-  repo: string;
-  ref: string;
-  untracked: string[];
-  ts: number;
-}
-
 const MAX_BASELINE_BYTES = 20 * 1024 * 1024;
 const STAGING_TTL_MS = 6 * 3600_000;
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -86,6 +98,7 @@ async function main(): Promise<void> {
     if (mode === 'pre') pre(L, input);
     else if (mode === 'post') post(L, input);
     else if (mode === 'prompt') prompt(L, input);
+    else if (mode === 'stop') appendJsonLine(L.events, { type: 'turn-end', session: input.session_id, prompt: input.prompt_id, ts: Date.now() });
     else if (mode === 'bash-pre') bashPre(L, input);
     else if (mode === 'bash-post') bashPost(L, input);
     else log(L, mode, `unknown mode`);
@@ -129,7 +142,7 @@ function log(L: Layout, mode: string, msg: string): void {
 }
 
 function filePathOf(input: HookInput): string | undefined {
-  const fp = input.tool_input?.file_path;
+  const fp = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
   if (typeof fp !== 'string' || !fp) return undefined;
   return path.isAbsolute(fp) ? fp : path.resolve(input.cwd || process.cwd(), fp);
 }
@@ -293,7 +306,28 @@ function prompt(L: Layout, input: HookInput): void {
   fs.writeSync(1, formatRevertReport(mine, cwd));
 }
 
-// ---------- Bash (optional) ----------
+// ---------- Bash ----------
+// A shell command can change any file, so the folders it may touch are snapshotted before it runs and
+// compared afterwards: the starting directory, the project directory, every `cd` target and every path
+// the command mentions. Inside a git repository, committed files come from `git stash create` and only
+// untracked files are copied; other folders are copied as a whole (up to MAX_FOLDER_FILES files), and
+// for larger ones only the files the command mentions are tracked.
+
+/** One folder's state before a command */
+type FolderSnap =
+  | { kind: 'git'; dir: string; ref: string | null; untracked: Record<string, Entry>; complete: boolean }
+  | { kind: 'dir'; dir: string; files: Record<string, Entry> };
+
+interface BashRecord {
+  ts: number;
+  snaps: FolderSnap[];
+  /** Files the command mentions outside those folders: their state before, or null if they did not exist */
+  files: Record<string, Entry | null>;
+}
+
+const MAX_FOLDERS = 6;
+const MAX_UNTRACKED = 5000;
+const BASH_BUDGET_MS = 4000;
 
 function git(cwd: string, args: string[], maxBuffer = 16 * 1024 * 1024): string | undefined {
   try {
@@ -324,58 +358,175 @@ function gitBytes(cwd: string, args: string[]): Buffer | undefined {
   }
 }
 
-function bashPre(L: Layout, input: HookInput): void {
-  if (!input.cwd || !input.tool_use_id) return;
-  const top = git(input.cwd, ['rev-parse', '--show-toplevel']);
-  if (!top) return;
-  // With uncommitted changes, stash create returns a snapshot commit; with a clean tree it prints nothing, so use HEAD
-  const ref = git(top, ['stash', 'create']) || git(top, ['rev-parse', '--verify', '-q', 'HEAD']);
-  if (!ref) return;
-  const untracked = (git(top, ['ls-files', '--others', '--exclude-standard', '-z']) ?? '').split('\0').filter(Boolean);
-  const snap: BashSnapshot = { repo: canonical(top), ref, untracked, ts: Date.now() };
-  writeAtomic(path.join(L.staging, `bash-${safeName(input.tool_use_id)}.json`), JSON.stringify(snap));
+function gitTop(dir: string): string | undefined {
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, '.git'))) return d;
+    if (path.dirname(d) === d) return undefined;
+  }
 }
 
-/** Whether this path exists in the snapshot commit */
-function inTree(snap: BashSnapshot, rel: string): boolean {
-  return git(snap.repo, ['cat-file', '-t', `${snap.ref}:${rel}`]) === 'blob';
+/** Untracked files git does not ignore (all files, when the repository has no commit to compare with) */
+function gitFiles(top: string, all: boolean, ignored: (p: string) => boolean): string[] | undefined {
+  const args = ['ls-files', '-z', ...(all ? ['--cached'] : []), '--others', '--exclude-standard', ...SNAPSHOT_EXCLUDES.map((x) => `--exclude=${x}`)];
+  const out = git(top, args, 64 * 1024 * 1024);
+  return out?.split('\0').filter((r) => r && !ignored(path.join(top, r)));
+}
+
+/** Which folders to snapshot for a command, and the files it mentions outside git repositories */
+function bashTargets(info: CommandInfo, ignored: (p: string) => boolean): { repos: string[]; folders: string[]; files: string[] } {
+  const repos = new Set<string>();
+  const folders = new Set<string>();
+  const files: string[] = [];
+  const project = process.env.CLAUDE_PROJECT_DIR;
+  for (const d of project ? [...info.dirs, project] : info.dirs) {
+    const dir = canonical(d);
+    const top = gitTop(dir);
+    if (top) repos.add(top);
+    else if (fs.existsSync(dir) && !ignored(dir)) folders.add(dir);
+  }
+  for (const p of info.paths) {
+    const abs = canonical(p);
+    const top = gitTop(abs);
+    if (top) repos.add(top);
+    else if (ignored(abs)) continue;
+    else if (fs.statSync(abs, { throwIfNoEntry: false })?.isDirectory()) folders.add(abs);
+    else files.push(abs);
+  }
+  return { repos: [...repos].slice(0, MAX_FOLDERS), folders: [...folders].slice(0, MAX_FOLDERS), files };
+}
+
+function bashRecordFile(L: Layout, input: HookInput): string {
+  return path.join(L.staging, `bash-${safeName(input.tool_use_id ?? '')}.json`);
+}
+
+function bashPre(L: Layout, input: HookInput): void {
+  const command = input.tool_input?.command;
+  if (!input.tool_use_id || typeof command !== 'string') return;
+  const info = analyzeCommand(command, input.cwd || process.cwd());
+  if (info.readOnly) return;
+  const deadline = Date.now() + BASH_BUDGET_MS;
+  const ignored = ignoreMatcher(L.ignoreFile, L.root);
+  const targets = bashTargets(info, ignored);
+  const record: BashRecord = { ts: Date.now(), snaps: [], files: {} };
+  for (const top of targets.repos) {
+    // With uncommitted changes, stash create returns a snapshot commit; with a clean tree it prints nothing, so use HEAD
+    const ref = git(top, ['stash', 'create']) || git(top, ['rev-parse', '--verify', '-q', 'HEAD']) || null;
+    const rels = gitFiles(top, !ref, ignored);
+    if (!rels) continue;
+    const idx = loadIndex(L, top);
+    const untracked = captureFiles(L, idx, rels.slice(0, MAX_UNTRACKED), deadline);
+    saveIndex(L, idx);
+    record.snaps.push({ kind: 'git', dir: top, ref, untracked, complete: rels.length <= MAX_UNTRACKED });
+  }
+  const walked: string[] = [];
+  for (const dir of targets.folders) {
+    const idx = loadIndex(L, dir);
+    if (isTooBig(idx)) continue;
+    const rels = listFolder(L, dir);
+    if (!rels) {
+      idx.tooBig = Date.now();
+      idx.files = {};
+      saveIndex(L, idx);
+      log(L, 'bash-pre', `${dir} has more than ${MAX_FOLDER_FILES} files: only files a command names are tracked there`);
+      continue;
+    }
+    delete idx.tooBig;
+    const files = captureFiles(L, idx, rels, deadline);
+    saveIndex(L, idx);
+    record.snaps.push({ kind: 'dir', dir, files });
+    walked.push(dir);
+  }
+  for (const f of targets.files) {
+    if (!walked.some((d) => isUnder(f, d))) record.files[f] = captureFile(L, f, undefined, deadline) ?? null;
+  }
+  if (record.snaps.length || Object.keys(record.files).length) writeAtomic(bashRecordFile(L, input), JSON.stringify(record));
 }
 
 function bashPost(L: Layout, input: HookInput): void {
   if (!input.tool_use_id) return;
-  const snapFile = path.join(L.staging, `bash-${safeName(input.tool_use_id)}.json`);
-  const snap = readJsonQuiet<BashSnapshot>(snapFile);
-  rmQuiet(snapFile);
-  if (!snap) return;
-  const changed = (git(snap.repo, ['diff', '--name-only', '--no-renames', '-z', snap.ref]) ?? '').split('\0').filter(Boolean);
-  const before = new Set(snap.untracked);
-  const created = (git(snap.repo, ['ls-files', '--others', '--exclude-standard', '-z']) ?? '')
-    .split('\0')
-    .filter((f) => f && !before.has(f));
-  const todo: Array<[string, boolean]> = [...changed.map((r): [string, boolean] => [r, false]), ...created.map((r): [string, boolean] => [r, true])];
-  for (const [rel, isNew] of todo) {
-    const p = canonical(path.join(snap.repo, rel));
-    if (isIgnored(p, L.ignoreFile, L.root)) continue;
-    const key = pathKey(p);
-    // `changed` holds tracked files present in the snapshot (pre-command content comes from it); `created`
-    // holds untracked files the command created. A tracked file missing from the snapshot (added with
-    // git add during the command) also counts as new.
-    const original = isNew ? null : (gitBytes(snap.repo, ['show', `${snap.ref}:${rel}`]) ?? (inTree(snap, rel) ? undefined : null));
-    if (original === undefined) {
-      log(L, 'bash-post', `cannot read ${rel} from ${snap.ref}`);
-      continue;
-    }
-    withLock(lockDir(L, key), () => {
-      if (fs.existsSync(metaFile(L, key))) {
-        addSession(L, key, input.session_id);
-      } else {
-        if (original) writeAtomic(baseFile(L, key), original);
-        else rmQuiet(baseFile(L, key));
-        const meta: BaselineMeta = { path: p, existed: !!original, ts: snap.ts, sessions: input.session_id ? [input.session_id] : [] };
-        writeAtomic(metaFile(L, key), JSON.stringify(meta));
+  const recFile = bashRecordFile(L, input);
+  const record = readJsonQuiet<BashRecord>(recFile);
+  if (!record) return;
+  const deadline = Date.now() + BASH_BUDGET_MS;
+  const ignored = ignoreMatcher(L.ignoreFile, L.root);
+  const changes = new Map<string, Buffer | null | undefined>();
+  const add = (c: FileChange) => {
+    if (!changes.has(c.abs)) changes.set(c.abs, c.before);
+  };
+  for (const s of record.snaps) {
+    const idx = loadIndex(L, s.dir);
+    if (s.kind === 'git') {
+      const tracked = s.ref ? (git(s.dir, ['diff', '--name-only', '--no-renames', '-z', s.ref]) ?? '').split('\0').filter(Boolean) : [];
+      for (const rel of tracked) {
+        // A file that was untracked before (and added to git by the command) is compared with its copy below
+        if (rel in s.untracked) continue;
+        const original = gitBytes(s.dir, ['show', `${s.ref}:${rel}`]);
+        const inTree = original !== undefined || git(s.dir, ['cat-file', '-t', `${s.ref}:${rel}`]) === 'blob';
+        add({ abs: path.join(s.dir, rel), before: original ?? (inTree ? undefined : null) });
       }
-      if (input.prompt_id) recordRoundWrite(L, input.prompt_id, key, p, original, input.session_id, input.cwd);
-    });
-    appendEvent(L, input, p, 'Bash');
+      const rels = gitFiles(s.dir, !s.ref, ignored);
+      if (rels) for (const c of diffFolder(L, idx, s.untracked, rels.slice(0, MAX_UNTRACKED), { deadline, complete: s.complete, since: record.ts })) add(c);
+    } else {
+      const rels = listFolder(L, s.dir) ?? Object.keys(s.files);
+      for (const c of diffFolder(L, idx, s.files, rels, { deadline, complete: true, since: record.ts })) add(c);
+    }
+    saveIndex(L, idx);
   }
+  for (const [abs, b] of Object.entries(record.files)) {
+    const now = captureFile(L, abs, undefined, deadline);
+    if (b === null ? now : now ? changed(b, now) : !fs.existsSync(abs)) add({ abs, before: b === null ? null : readObject(L, b[2]) });
+  }
+  rmQuiet(recFile);
+  const saves = userSavesSince(L, record.ts - 2000);
+  for (const [abs, before] of changes) recordBashChange(L, input, canonical(abs), before, record.ts, saves, ignored);
+  if (Math.random() < 0.05) {
+    const pending = fs.readdirSync(L.staging).filter((n) => n.startsWith('bash-')).map((n) => readQuiet(path.join(L.staging, n))?.toString() ?? '');
+    gcSnapshots(L, pending);
+  }
+}
+
+/** Content hashes of files saved in VS Code since `since`, per path: those changes are the user's, not Claude's */
+function userSavesSince(L: Layout, since: number): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const s of readJsonLines<{ path?: string; ts?: number; hash?: string }>(L.userSaves)) {
+    if (!s?.path || !s.hash || (s.ts ?? 0) < since) continue;
+    const set = out.get(s.path) ?? new Set<string>();
+    set.add(s.hash);
+    out.set(s.path, set);
+  }
+  return out;
+}
+
+function recordBashChange(
+  L: Layout,
+  input: HookInput,
+  p: string,
+  before: Buffer | null | undefined,
+  ts: number,
+  saves: Map<string, Set<string>>,
+  ignored: (p: string) => boolean,
+): void {
+  if (ignored(p)) return;
+  if (before === undefined) {
+    log(L, 'bash-post', `${p} changed, but its earlier content is unknown (too large or not captured in time)`);
+    return;
+  }
+  const size = fs.statSync(p, { throwIfNoEntry: false })?.size;
+  if (before === null && size === undefined) return; // Created and removed again
+  const now = size !== undefined && size <= MAX_BASELINE_BYTES ? readQuiet(p) : undefined;
+  if (before && now && contentEqual(before, now)) return;
+  if (now && saves.get(p)?.has(contentHash(now))) return;
+  const key = pathKey(p);
+  withLock(lockDir(L, key), () => {
+    if (fs.existsSync(metaFile(L, key))) {
+      addSession(L, key, input.session_id);
+    } else {
+      if (before) writeAtomic(baseFile(L, key), before);
+      else rmQuiet(baseFile(L, key));
+      const meta: BaselineMeta = { path: p, existed: before !== null, ts, sessions: input.session_id ? [input.session_id] : [] };
+      writeAtomic(metaFile(L, key), JSON.stringify(meta));
+    }
+    if (input.prompt_id) recordRoundWrite(L, input.prompt_id, key, p, before, input.session_id, input.cwd);
+  });
+  appendEvent(L, input, p, 'Bash');
 }

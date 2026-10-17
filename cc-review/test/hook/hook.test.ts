@@ -1,5 +1,6 @@
 // Feeds crafted JSON to hook.js on stdin and asserts on the files in the store. CC_REVIEW_HOME points at a temp dir.
 import { execFileSync, spawnSync } from 'node:child_process';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,11 +22,11 @@ afterEach(() => {
   fs.rmSync(proj, { recursive: true, force: true });
 });
 
-function run(mode: string, input: unknown): { stdout: string; status: number | null; ms: number } {
+function run(mode: string, input: unknown, env: Record<string, string> = {}): { stdout: string; status: number | null; ms: number } {
   const t = Date.now();
   const r = spawnSync(process.execPath, [HOOK, mode], {
     input: typeof input === 'string' ? input : JSON.stringify(input),
-    env: { ...process.env, CC_REVIEW_HOME: home },
+    env: { ...process.env, CLAUDE_PROJECT_DIR: '', CC_REVIEW_HOME: home, ...env },
     encoding: 'utf8',
   });
   return { stdout: r.stdout, status: r.status, ms: Date.now() - t };
@@ -155,6 +156,17 @@ describe('hook pre/post', () => {
   });
 });
 
+describe('hook stop', () => {
+  it('appends a turn-end event and prints nothing', () => {
+    fs.mkdirSync(home, { recursive: true });
+    const r = run('stop', { session_id: 's1', prompt_id: 'p1', hook_event_name: 'Stop', stop_hook_active: false });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+    const events = fs.readFileSync(L().events, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(events.at(-1)).toEqual({ type: 'turn-end', session: 's1', prompt: 'p1', ts: expect.any(Number) });
+  });
+});
+
 describe('hook prompt', () => {
   const revert = (id: string, p: string, sessions: string[], extra: object = {}) =>
     JSON.stringify({ type: 'revert', id, path: p, kind: 'modified', startLine: 3, endLine: 4, undone: ['bad()'], sessions, ts: 1, ...extra });
@@ -189,37 +201,120 @@ describe('hook prompt', () => {
   });
 });
 
-describe('hook bash (optional)', () => {
-  it('captures files a Bash command changed or created in a git repo', () => {
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: proj, stdio: 'pipe' });
+describe('hook bash', () => {
+  const bash = (command: string, cwd: string, change: () => void, opts: { id?: string; env?: Record<string, string> } = {}) => {
+    const input = { session_id: 's1', prompt_id: 'p1', cwd, tool_name: 'Bash', tool_use_id: opts.id ?? 'b1', tool_input: { command } };
+    expect(run('bash-pre', input, opts.env).status).toBe(0);
+    change();
+    expect(run('bash-post', input, opts.env).status).toBe(0);
+  };
+  const gitInit = (dir: string) => {
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
     git('init', '-q');
     git('config', 'user.email', 't@t');
     git('config', 'user.name', 't');
+    return git;
+  };
+  const events = () => fs.readFileSync(L().events, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+  it('captures what a command changed, created or deleted in a git repo, including untracked files', () => {
+    const git = gitInit(proj);
     fs.writeFileSync(path.join(proj, 'tracked.txt'), 'committed\n');
+    fs.writeFileSync(path.join(proj, 'gone.txt'), 'bye\n');
+    fs.writeFileSync(path.join(proj, '.gitignore'), 'dist/\n');
     git('add', '.');
     git('commit', '-qm', 'init');
     fs.writeFileSync(path.join(proj, 'tracked.txt'), 'dirty before command\n');
     fs.writeFileSync(path.join(proj, 'old-untracked.txt'), 'u\n');
 
-    const input = { session_id: 's1', cwd: proj, tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'sed ...' } };
-    expect(run('bash-pre', input).status).toBe(0);
-    fs.writeFileSync(path.join(proj, 'tracked.txt'), 'changed by command\n');
-    fs.writeFileSync(path.join(proj, 'created.txt'), 'new\n');
-    fs.writeFileSync(path.join(proj, 'old-untracked.txt'), 'u2\n');
-    expect(run('bash-post', input).status).toBe(0);
+    bash('./update.sh', proj, () => {
+      fs.writeFileSync(path.join(proj, 'tracked.txt'), 'changed by command\n');
+      fs.writeFileSync(path.join(proj, 'created.txt'), 'new\n');
+      fs.writeFileSync(path.join(proj, 'old-untracked.txt'), 'u2\n');
+      fs.rmSync(path.join(proj, 'gone.txt'));
+      fs.mkdirSync(path.join(proj, 'dist'));
+      fs.writeFileSync(path.join(proj, 'dist/out.js'), 'ignored\n');
+    });
 
-    const tracked = path.join(proj, 'tracked.txt');
-    expect(base(tracked)).toBe('dirty before command\n');
+    expect(base(path.join(proj, 'tracked.txt'))).toBe('dirty before command\n');
+    expect(base(path.join(proj, 'old-untracked.txt'))).toBe('u\n');
+    expect(base(path.join(proj, 'gone.txt'))).toBe('bye\n');
     expect(meta(path.join(proj, 'created.txt'))).toMatchObject({ existed: false });
-    // Untracked before the command: the snapshot has no original content, so it cannot be reviewed
-    expect(hasBaseline(path.join(proj, 'old-untracked.txt'))).toBe(false);
+    expect(hasBaseline(path.join(proj, 'dist/out.js'))).toBe(false);
+    expect(events().map((e) => e.tool)).toEqual(['Bash', 'Bash', 'Bash', 'Bash']);
+    // The turn's round has the file's content from before the command
+    expect(fs.readFileSync(path.join(L().rounds, 'p1', `${pathKey(path.join(proj, 'tracked.txt'))}.before`), 'utf8')).toBe('dirty before command\n');
   });
 
-  it('does nothing outside a git repo', () => {
-    const input = { session_id: 's1', cwd: proj, tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'ls' } };
-    expect(run('bash-pre', input).status).toBe(0);
-    expect(run('bash-post', input).status).toBe(0);
-    expect(fs.readdirSync(L().baselines)).toEqual([]);
+  it('captures changes in a folder outside git, skipping generated folders', () => {
+    fs.writeFileSync(path.join(proj, 'notes.md'), 'one\n');
+    fs.mkdirSync(path.join(proj, 'node_modules/x'), { recursive: true });
+    fs.writeFileSync(path.join(proj, 'node_modules/x/index.js'), 'a\n');
+    bash('python3 tidy.py', proj, () => {
+      fs.writeFileSync(path.join(proj, 'notes.md'), 'two\n');
+      fs.writeFileSync(path.join(proj, 'fresh.txt'), 'new\n');
+      fs.writeFileSync(path.join(proj, 'node_modules/x/index.js'), 'b\n');
+    });
+    expect(base(path.join(proj, 'notes.md'))).toBe('one\n');
+    expect(meta(path.join(proj, 'fresh.txt'))).toMatchObject({ existed: false });
+    expect(hasBaseline(path.join(proj, 'node_modules/x/index.js'))).toBe(false);
+  });
+
+  it('follows `cd` into a repository from a folder outside it', () => {
+    const repo = path.join(proj, 'app');
+    fs.mkdirSync(repo);
+    const git = gitInit(repo);
+    fs.writeFileSync(path.join(repo, 'a.ts'), 'old\n');
+    git('add', '.');
+    git('commit', '-qm', 'init');
+    // The command names no file, and the starting folder skips the nested repository: only the cd target finds it
+    bash('cd app && ./fix.sh', proj, () => fs.writeFileSync(path.join(repo, 'a.ts'), 'new\n'));
+    expect(base(path.join(repo, 'a.ts'))).toBe('old\n');
+  });
+
+  it('tracks the project directory even when the command runs elsewhere', () => {
+    fs.writeFileSync(path.join(proj, 'p.txt'), '1\n');
+    const elsewhere = canonical(fs.mkdtempSync(path.join(os.tmpdir(), 'ccr-cwd-')));
+    try {
+      bash('make', elsewhere, () => fs.writeFileSync(path.join(proj, 'p.txt'), '2\n'), { env: { CLAUDE_PROJECT_DIR: proj } });
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+    expect(base(path.join(proj, 'p.txt'))).toBe('1\n');
+  });
+
+  it('skips read-only commands entirely', () => {
+    fs.writeFileSync(path.join(proj, 'a.txt'), 'x\n');
+    bash('ls -la && grep -rn x . | head', proj, () => fs.writeFileSync(path.join(proj, 'a.txt'), 'changed elsewhere\n'));
+    expect(fs.readdirSync(L().staging)).toEqual([]);
+    expect(hasBaseline(path.join(proj, 'a.txt'))).toBe(false);
+  });
+
+  it('does not blame Claude for a file you saved in VS Code while the command ran', () => {
+    fs.writeFileSync(path.join(proj, 'mine.txt'), 'before\n');
+    fs.writeFileSync(path.join(proj, 'theirs.txt'), 'before\n');
+    bash('npm run build', proj, () => {
+      fs.writeFileSync(path.join(proj, 'mine.txt'), 'saved by me\n');
+      const hash = crypto.createHash('sha1').update('saved by me\n').digest('hex');
+      fs.appendFileSync(L().userSaves, JSON.stringify({ path: path.join(proj, 'mine.txt'), ts: Date.now(), hash }) + '\n');
+      fs.writeFileSync(path.join(proj, 'theirs.txt'), 'by the command\n');
+    });
+    expect(hasBaseline(path.join(proj, 'mine.txt'))).toBe(false);
+    expect(base(path.join(proj, 'theirs.txt'))).toBe('before\n');
+  });
+
+  it('in a folder too large to snapshot, tracks only the files the command names', () => {
+    for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(proj, `f${i}.txt`), `${i}\n`);
+    const env = { CC_REVIEW_MAX_FOLDER_FILES: '3' };
+    bash('echo more >> f1.txt && ./other.sh', proj, () => {
+      fs.appendFileSync(path.join(proj, 'f1.txt'), 'more\n');
+      fs.writeFileSync(path.join(proj, 'f2.txt'), 'changed silently\n');
+      fs.writeFileSync(path.join(proj, 'made.txt'), 'x\n');
+    }, { env });
+    expect(base(path.join(proj, 'f1.txt'))).toBe('1\n');
+    expect(hasBaseline(path.join(proj, 'f2.txt'))).toBe(false);
+    expect(hasBaseline(path.join(proj, 'made.txt'))).toBe(false);
+    expect(fs.readFileSync(L().hookLog, 'utf8')).toMatch(/more than 3 files/);
   });
 });
 

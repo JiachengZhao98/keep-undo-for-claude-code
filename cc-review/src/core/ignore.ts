@@ -125,30 +125,33 @@ function readText(file: string): string | undefined {
   }
 }
 
-/** Find the nearest .ccreviewignore walking up from the file's directory. */
-function nearestProjectIgnore(absPath: string): { dir: string; content: string } | undefined {
-  let dir = path.dirname(absPath);
-  for (let i = 0; i < 64; i++) {
+/** isIgnored for many paths: the ignore files are read once and the nearest .ccreviewignore is cached per directory. */
+export function ignoreMatcher(globalIgnoreFile: string, reviewRootDir: string): (absPath: string) => boolean {
+  const global = parseIgnore(readText(globalIgnoreFile) ?? DEFAULT_IGNORE, undefined);
+  const nearest = new Map<string, IgnoreRule[] | null>();
+  const projectRules = (dir: string): IgnoreRule[] | null => {
+    let rules = nearest.get(dir);
+    if (rules !== undefined) return rules;
     const content = readText(path.join(dir, '.ccreviewignore'));
-    if (content !== undefined) return { dir, content };
     const parent = path.dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-  return undefined;
+    rules = content !== undefined ? parseIgnore(content, dir) : parent === dir ? null : projectRules(parent);
+    nearest.set(dir, rules);
+    return rules;
+  };
+  return (absPath) => {
+    // Always ignore our own data directory
+    const rel = path.relative(reviewRootDir, absPath);
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
+    let result = matchRules(global, absPath);
+    const project = projectRules(path.dirname(absPath));
+    if (project) {
+      const r = matchRules(project, absPath);
+      if (r !== undefined) result = r;
+    }
+    return result === true;
+  };
 }
 
 export function isIgnored(absPath: string, globalIgnoreFile: string, reviewRootDir: string): boolean {
-  // Always ignore our own data directory
-  const rel = path.relative(reviewRootDir, absPath);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
-
-  const globalContent = readText(globalIgnoreFile) ?? DEFAULT_IGNORE;
-  let result = matchRules(parseIgnore(globalContent, undefined), absPath);
-  const project = nearestProjectIgnore(absPath);
-  if (project) {
-    const r = matchRules(parseIgnore(project.content, project.dir), absPath);
-    if (r !== undefined) result = r;
-  }
-  return result === true;
+  return ignoreMatcher(globalIgnoreFile, reviewRootDir)(absPath);
 }
