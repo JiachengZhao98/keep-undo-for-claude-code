@@ -2,7 +2,7 @@
   "name": "cc-review",
   "displayName": "Claude Code Review (Keep/Undo)",
   "description": "Keep or undo Claude Code's file edits change by change, like Copilot",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -25,13 +25,19 @@
         "command": "ccReview.keepHunk",
         "title": "Keep Change",
         "category": "Claude Review",
-        "icon": "$(check)"
+        "icon": {
+          "light": "media/keep-light.svg",
+          "dark": "media/keep-dark.svg"
+        }
       },
       {
         "command": "ccReview.undoHunk",
         "title": "Undo Change",
         "category": "Claude Review",
-        "icon": "$(discard)"
+        "icon": {
+          "light": "media/undo-light.svg",
+          "dark": "media/undo-dark.svg"
+        }
       },
       {
         "command": "ccReview.nextHunk",
@@ -111,7 +117,7 @@
         "command": "ccReview.askClaude",
         "title": "Ask Claude About This Change",
         "category": "Claude Review",
-        "icon": "$(comment-discussion)"
+        "icon": "media/ask.svg"
       },
       {
         "command": "ccReview.groupByRound",
@@ -382,7 +388,7 @@
           "type": "number",
           "default": 20,
           "minimum": 1,
-          "description": "Maximum number of deleted-line insets in one editor at a time (each inset is a webview)."
+          "description": "Maximum number of changes per editor that get insets (deleted lines and buttons) at a time; each inset is a webview. More are added as you scroll."
         },
         "ccReview.maxFileSizeKB": {
           "type": "number",
@@ -404,10 +410,15 @@
           "default": true,
           "description": "Keep the end-of-turn summary on screen until you close it. VS Code only does this for error notifications, so the summary is shown as one, with an error icon. Turn this off for a regular notification that hides after 10 seconds."
         },
-        "ccReview.codeLens": {
+        "ccReview.fileButtons": {
           "type": "boolean",
           "default": true,
-          "description": "Show Keep | Undo above each change."
+          "description": "Show a blue Keep and a red Undo button for the whole file above the first line of each file Claude changed. Uses the same editorInsets API as the deleted lines."
+        },
+        "ccReview.changeButtons": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Keep, Undo and Ask Claude buttons below each change: colored buttons when the editorInsets API is enabled, plain links (CodeLens) otherwise."
         },
         "ccReview.nodePath": {
           "type": "string",

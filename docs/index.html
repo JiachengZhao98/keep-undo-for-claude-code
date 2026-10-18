@@ -34,6 +34,9 @@
   --str: #9a5600;
   --cm: #6f7b8b;
   --chip: #e6ebf1;
+  --keep: #0969da;
+  --undo: #cf222e;
+  --ask: #c15f3c;
   --shadow: 0 1px 2px rgba(19, 32, 46, 0.06), 0 10px 28px rgba(19, 32, 46, 0.09);
   --font-display: "Martian Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -58,6 +61,9 @@
     --str: #f0b46a;
     --cm: #8190a1;
     --chip: #1f2c3a;
+    --keep: #1f6feb;
+    --undo: #f85149;
+    --ask: #c15f3c;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
     color-scheme: dark;
   }
@@ -81,6 +87,9 @@
   --str: #f0b46a;
   --cm: #8190a1;
   --chip: #1f2c3a;
+  --keep: #1f6feb;
+  --undo: #f85149;
+  --ask: #c15f3c;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
   color-scheme: dark;
 }
@@ -172,26 +181,21 @@ kbd { border: 1px solid var(--rule); border-bottom-width: 2px; }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px 6px;
-  padding: 12px 16px 4px calc(16px + 2.6rem);
+  gap: 6px;
+  padding: 10px 16px 14px calc(16px + 2.6rem);
   font-family: var(--font-display);
   font-stretch: 75%;
   font-size: 0.82rem;
   color: var(--lens);
 }
-.lens button {
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: 0;
-  padding: 2px 4px;
-  cursor: pointer;
-  border-radius: 3px;
-}
-.lens button:hover { color: var(--ink); background: var(--chip); }
-.lens .sep { opacity: 0.6; }
-.lens .meta { margin-left: 6px; }
-.rows { padding-bottom: 12px; }
+.lens .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lens .b { font-size: 0.8rem; padding: 2px 10px; margin: 0; cursor: pointer; }
+.lens .b.keep:hover { filter: brightness(1.1); }
+.lens .b.undo:hover { background: color-mix(in srgb, var(--undo) 12%, transparent); }
+.lens .link { font: inherit; color: inherit; background: none; border: 0; padding: 2px 4px; cursor: pointer; border-radius: 3px; }
+.lens .link:hover { color: var(--ink); background: var(--chip); }
+.lens .meta { margin-left: 4px; }
+.rows { padding-top: 12px; }
 .row {
   display: grid;
   grid-template-columns: 2.6rem minmax(0, 1fr);
@@ -280,8 +284,25 @@ section.band { padding-block: 64px; border-top: 1px solid var(--rule); }
 .l.add { background: var(--add-bg); border-left-color: var(--add-bar); }
 .l.del { background: var(--del-bg); }
 .l.del .c { color: var(--del-fg); }
-.l.cl .c { color: var(--lens); font-size: 0.92em; }
-.l.cl .c b { font-weight: 400; color: var(--ink); }
+.l.btns .c, .l.fbar .c { display: flex; align-items: center; }
+.l.fbar { padding-block: 6px; border-bottom: 1px solid var(--rule); margin-bottom: 4px; }
+.b {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  padding: 0 0.55em;
+  margin-right: 6px;
+  border: 1px solid;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.b.keep { background: var(--keep); border-color: var(--keep); color: #fff; }
+.b.undo { background: transparent; border-color: var(--undo); color: var(--undo); }
+.b.ask { background: var(--ask); border-color: var(--ask); color: #fff; }
+.l.fbar .b { font-size: 0.76rem; padding: 0.1em 0.7em; }
+.fsum { color: var(--muted); font-family: var(--font-body); font-size: 0.75rem; margin-left: 4px; }
 .kw { color: var(--kw); }
 .fn { color: var(--fn); }
 .st { color: var(--str); }
@@ -296,7 +317,7 @@ section.band { padding-block: 64px; border-top: 1px solid var(--rule); }
 .swatch { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .swatch.add { background: var(--add-bg); box-shadow: inset 3px 0 0 var(--add-bar); }
 .swatch.del { background: var(--del-bg); box-shadow: inset 0 0 0 1px var(--del-fg); }
-.swatch.lens { background: var(--chip); box-shadow: inset 0 0 0 1px var(--lens); }
+.notes dt .b { margin-right: 0; }
 .keys { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; color: var(--muted); }
 
 /* ---------- end of turn ---------- */
@@ -340,7 +361,11 @@ section.band { padding-block: 64px; border-top: 1px solid var(--rule); }
 .ti .d .p { color: var(--add-fg); }
 .ti .d .m { color: var(--del-fg); }
 .ti.sel { background: var(--chip); }
-.ti .hov { margin-left: auto; color: var(--muted); font-family: var(--font-display); font-stretch: 75%; font-size: 0.75rem; }
+.ti .hov { margin-left: auto; display: flex; gap: 4px; }
+.ic { display: inline-grid; place-items: center; width: 15px; height: 13px; border: 1px solid; border-radius: 3px; font-size: 9px; line-height: 1; }
+.ic.keep { background: var(--keep); border-color: var(--keep); color: #fff; }
+.ic.undo { border-color: var(--undo); color: var(--undo); }
+.ic.ask { background: var(--ask); border-color: var(--ask); color: #fff; }
 .ti.child.sel { grid-template-columns: auto minmax(0, 1fr) auto; }
 
 /* ---------- features ---------- */
@@ -457,15 +482,15 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
     <div class="wrap">
       <div class="hunk" id="hunk" data-state="">
         <div class="hunk-head"><span class="file">how-you-review.md</span><span>· 1 change from Claude</span></div>
-        <div class="lens" id="lens">
-          <span class="acts">
-            <button type="button" data-act="keep">✓ Keep</button><span class="sep">|</span><button type="button" data-act="undo">↺ Undo</button><span class="meta">Claude 1/1 · +1 −1 · try it</span>
-          </span>
-          <span class="done" hidden><span id="done-text"></span> <button type="button" data-act="reset">Show the change again</button></span>
-        </div>
         <div class="rows">
           <div class="row del" aria-hidden="true"><span class="ln" id="del-ln"></span><p class="hero-line">Accept the whole turn and hope for the best.</p></div>
           <div class="row add"><span class="ln">1</span><h1 class="hero-line">Keep or undo every change Claude makes, one at a time.</h1></div>
+        </div>
+        <div class="lens" id="lens">
+          <span class="acts">
+            <button type="button" class="b keep" data-act="keep">✓ Keep</button><button type="button" class="b undo" data-act="undo">↺ Undo</button><span class="meta">try it</span>
+          </span>
+          <span class="done" hidden><span id="done-text"></span> <button type="button" class="link" data-act="reset">Show the change again</button></span>
         </div>
       </div>
 
@@ -489,26 +514,29 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
         <figure class="editor" aria-label="A file with two pending changes from Claude">
           <div class="tabs"><span class="tab">cart.ts <span class="dot">●</span></span></div>
           <div class="code">
-<div class="l"><span class="n">7</span><span class="c"></span></div>
-<div class="l"><span class="n">8</span><span class="c"><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: Item[]): <span class="kw">number</span> {</span></div>
-<div class="l cl"><span class="n"></span><span class="c"><b>✓ Keep</b> | <b>↺ Undo</b> | <b>Ask Claude</b> | Claude 1/2 · +2 −1 · "Fix the total for an emp…"</span></div>
+<div class="l fbar"><span class="n"></span><span class="c"><span class="b keep">✓ Keep</span><span class="b undo">↺ Undo</span><span class="fsum">Claude changed this file · 2 changes · +2 −2</span></span></div>
+<div class="l"><span class="n">1</span><span class="c"><span class="kw">import type</span> { Item } <span class="kw">from</span> <span class="st">'./types'</span>;</span></div>
+<div class="l"><span class="n">2</span><span class="c"></span></div>
+<div class="l"><span class="n">3</span><span class="c"><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: Item[]): <span class="kw">number</span> {</span></div>
 <div class="l del"><span class="n"></span><span class="c">  <span class="kw">return</span> items.reduce((sum, i) =&gt; sum + i.price * i.qty);</span></div>
-<div class="l add"><span class="n">9</span><span class="c">  <span class="kw">if</span> (items.length === <span class="st">0</span>) <span class="kw">return</span> <span class="st">0</span>;</span></div>
-<div class="l add"><span class="n">10</span><span class="c">  <span class="kw">return</span> items.reduce((sum, i) =&gt; sum + i.price * i.qty, <span class="st">0</span>);</span></div>
-<div class="l"><span class="n">11</span><span class="c">}</span></div>
-<div class="l"><span class="n">12</span><span class="c"></span></div>
-<div class="l"><span class="n">13</span><span class="c"><span class="kw">export function</span> <span class="fn">formatPrice</span>(cents: <span class="kw">number</span>): <span class="kw">string</span> {</span></div>
-<div class="l cl"><span class="n"></span><span class="c"><b>✓ Keep</b> | <b>↺ Undo</b> | <b>Ask Claude</b> | Claude 2/2 · −1 · "Fix the total for an emp…"</span></div>
+<div class="l add"><span class="n">4</span><span class="c">  <span class="kw">if</span> (items.length === <span class="st">0</span>) <span class="kw">return</span> <span class="st">0</span>;</span></div>
+<div class="l add"><span class="n">5</span><span class="c">  <span class="kw">return</span> items.reduce((sum, i) =&gt; sum + i.price * i.qty, <span class="st">0</span>);</span></div>
+<div class="l btns"><span class="n"></span><span class="c"><span class="b keep">✓ Keep</span><span class="b undo">↺ Undo</span><span class="b ask">Ask Claude</span></span></div>
+<div class="l"><span class="n">6</span><span class="c">}</span></div>
+<div class="l"><span class="n">7</span><span class="c"></span></div>
+<div class="l"><span class="n">8</span><span class="c"><span class="kw">export function</span> <span class="fn">formatPrice</span>(cents: <span class="kw">number</span>): <span class="kw">string</span> {</span></div>
 <div class="l del"><span class="n"></span><span class="c">  <span class="cm">// TODO: support other currencies</span></span></div>
-<div class="l"><span class="n">14</span><span class="c">  <span class="kw">return</span> <span class="st">`$${(cents / 100).toFixed(2)}`</span>;</span></div>
-<div class="l"><span class="n">15</span><span class="c">}</span></div>
+<div class="l btns"><span class="n"></span><span class="c"><span class="b keep">✓ Keep</span><span class="b undo">↺ Undo</span><span class="b ask">Ask Claude</span></span></div>
+<div class="l"><span class="n">9</span><span class="c">  <span class="kw">return</span> <span class="st">`$${(cents / 100).toFixed(2)}`</span>;</span></div>
+<div class="l"><span class="n">10</span><span class="c">}</span></div>
           </div>
         </figure>
         <div class="aside">
         <dl class="notes">
           <div><dt><span class="swatch add"></span>Green lines</dt><dd>What Claude added, with a bar in the gutter and a mark on the scrollbar.</dd></div>
           <div><dt><span class="swatch del"></span>Red lines</dt><dd>What Claude removed, drawn right where it was, with the same syntax colors as your theme. They aren't part of the file.</dd></div>
-          <div><dt><span class="swatch lens"></span>Keep | Undo</dt><dd>Above every change. Undo is an ordinary edit, so <kbd>⌘Z</kbd> brings the change back. The label names the message of yours that produced it.</dd></div>
+          <div><dt><span class="b keep">✓ Keep</span><span class="b undo">↺ Undo</span><span class="b ask">Ask Claude</span></dt><dd>Below every change. Undo is an ordinary edit, so <kbd>⌘Z</kbd> brings the change back. Ask Claude opens Claude Code with the change already filled in.</dd></div>
+          <div><dt>The whole file</dt><dd>The bar above the first line keeps or undoes every change in the file at once.</dd></div>
         </dl>
         <div class="keys"><span><kbd>⌃⌥K</kbd> Keep</span><span><kbd>⌃⌥U</kbd> Undo</span><span><kbd>⌃⌥N</kbd> <kbd>⌃⌥P</kbd> Next / previous</span><span><kbd>⌃⌥C</kbd> Ask Claude</span></div>
         </div>
@@ -540,8 +568,8 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
           <div class="tree" role="img" aria-label="The Claude Changes list in the Source Control sidebar">
             <div class="tree-head">Claude Changes <span class="count">4</span> <span class="desc">3 files</span><span class="acts" aria-hidden="true">⧉ ✓✓ ✕✕ ···</span></div>
             <div class="ti"><span class="tw">▾</span><span>cart.ts</span><span class="d">src  <span class="p">+2</span> <span class="m">−2</span></span></div>
-            <div class="ti child sel"><span>Lines 9–10</span><span class="d"><span class="p">+2</span> <span class="m">−1</span>  if (items.length === 0) return 0;</span><span class="hov">✓ ↺ Ask</span></div>
-            <div class="ti child"><span>Before line 14</span><span class="d"><span class="m">−1</span>  // TODO: support other currencies</span></div>
+            <div class="ti child sel"><span>Lines 4–5</span><span class="d"><span class="p">+2</span> <span class="m">−1</span>  if (items.length === 0) return 0;</span><span class="hov" aria-hidden="true"><span class="ic keep">✓</span><span class="ic undo">↺</span><span class="ic ask"><svg viewBox="0 0 16 16" width="9" height="9"><path d="M2 3h12v7H8l-3 3v-3H2z" fill="currentColor"/></svg></span></span></div>
+            <div class="ti child"><span>Before line 9</span><span class="d"><span class="m">−1</span>  // TODO: support other currencies</span></div>
             <div class="ti"><span class="tw">▸</span><span>cart.test.ts</span><span class="d">test  new</span></div>
             <div class="ti"><span class="tw">▸</span><span>README.md</span><span class="d"><span class="p">+4</span></span></div>
           </div>
@@ -598,11 +626,11 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
 cd keep-undo-for-claude-code/cc-review
 npm install
 npm run package
-code --install-extension cc-review-0.3.0.vsix</pre><button class="copy" type="button" data-copy="s1">Copy</button></div>
+code --install-extension cc-review-0.5.0.vsix</pre><button class="copy" type="button" data-copy="s1">Copy</button></div>
         </li>
         <li>
           <h3>Allow the inline red lines</h3>
-          <p>Run <strong>Preferences: Configure Runtime Arguments</strong>, add this line to <code>argv.json</code>, then quit and reopen VS Code. Without it, deleted lines show on hover instead.</p>
+          <p>Run <strong>Preferences: Configure Runtime Arguments</strong>, add this line to <code>argv.json</code>, then quit and reopen VS Code. Without it, deleted lines show on hover instead and the colored buttons become plain text links.</p>
           <div class="snippet"><pre id="s2">"enable-proposed-api": ["local.cc-review"]</pre><button class="copy" type="button" data-copy="s2">Copy</button></div>
         </li>
         <li>
