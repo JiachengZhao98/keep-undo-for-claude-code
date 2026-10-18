@@ -1,8 +1,8 @@
 # Claude Code Review (Keep / Undo)
 
-[![Release](https://img.shields.io/github/v/release/JiachengZhao98/keep-undo-for-claude-code)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest)
+[![Release](https://badgen.net/github/release/JiachengZhao98/keep-undo-for-claude-code)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest)
 [![CI](https://github.com/JiachengZhao98/keep-undo-for-claude-code/actions/workflows/ci.yml/badge.svg)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/JiachengZhao98/keep-undo-for-claude-code)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/blob/main/LICENSE)
 
 Review the files Claude Code edits change by change, the way Copilot does: added lines on a green background, deleted lines shown as red "phantom" lines highlighted with your theme, and Keep, Undo and Ask Claude buttons below every change. Claude writes to disk as usual and you review afterwards. You can group changes by the prompt that produced them, and ask Claude about any single change.
 
