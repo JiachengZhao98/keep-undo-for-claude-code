@@ -1,0 +1,48 @@
+name: Release
+
+# Push a tag like v0.5.0 (matching the version in cc-review/package.json) to build the
+# extension and publish it as a GitHub release, so it can be installed without building.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish the VSIX
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cc-review
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cc-review/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Check that the tag matches the package version
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - run: npm run package
+
+      # A fixed file name keeps releases/latest/download/cc-review.vsix working for every release
+      - run: mv "cc-review-${GITHUB_REF_NAME#v}.vsix" cc-review.vsix
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" cc-review.vsix --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
