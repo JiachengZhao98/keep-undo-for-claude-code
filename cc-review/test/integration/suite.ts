@@ -143,7 +143,7 @@ test('creation time with 50 insets at once', async () => {
 
 // ---------------- In-editor review ----------------
 
-test('after Claude edits a file: hunks, phantom lines and CodeLens appear', async () => {
+test('after Claude edits a file: hunks, phantom lines and buttons below each change appear', async () => {
   const p = claudeWrites('src/flow.ts', 'a\nb\nc\nd\ne\nf\n', 'a\nB\nc\nd\nnew1\nnew2\ne\n');
   const pf = await pending(p, 3);
   assert.deepEqual(
@@ -156,13 +156,29 @@ test('after Claude edits a file: hunks, phantom lines and CodeLens appear', asyn
   );
   const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
   await waitFor('two phantom line insets', () => api.controller.insets.insetCount === 2);
+  // Buttons below each change: two rows of their own, and one inside the pure deletion's inset
+  await waitFor('buttons for all three changes', () => api.controller.insets.changeButtonCount === 3);
   const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', ed.document.uri);
-  const keeps = lenses.filter((l) => l.command?.command === 'ccReview.keepHunk');
-  assert.equal(keeps.length, 3);
-  assert.deepEqual(
-    keeps.map((l) => l.range.start.line),
-    [1, 4, 7],
-  );
+  assert.equal(lenses.filter((l) => l.command?.command === 'ccReview.keepHunk').length, 0);
+});
+
+test('a changed file gets a Keep / Undo bar at the top; a new file shows it instead of its file-level CodeLens', async () => {
+  const p = claudeWrites('bar/edited.ts', 'a\nb\n', 'a\nB\n');
+  await pending(p, 1);
+  await vscode.window.showTextDocument(vscode.Uri.file(p));
+  await waitFor('the file bar', () => api.controller.insets.fileBarCount === 1);
+  await api.controller.keepFile(p);
+  await resolved(p);
+  await waitFor('the file bar to go away once nothing is left to review', () => api.controller.insets.fileBarCount === 0);
+
+  const created = claudeWrites('bar/created.ts', undefined, 'new\n');
+  await waitFor('the new file to be pending', () => api.model.getFile(created));
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(created));
+  await waitFor('the file bar on the new file', () => api.controller.insets.fileBarCount === 1);
+  const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', ed.document.uri);
+  assert.equal(lenses.filter((l) => l.command?.command === 'ccReview.undoFile').length, 0);
+  await api.controller.keepFile(created);
+  await resolved(created);
 });
 
 test('hunk-level Keep / Undo: Undo writes to disk and records a revert; the baseline is deleted after the last hunk', async () => {
@@ -324,11 +340,20 @@ test('hover fallback: no insets with phantomLines = hover', async () => {
   const c = vscode.workspace.getConfiguration('ccReview');
   await c.update('phantomLines', 'hover', vscode.ConfigurationTarget.Global);
   try {
-    const p = claudeWrites('hover/a.ts', 'a\nb\nc\n', 'a\nc\n');
-    await pending(p, 1);
-    await vscode.window.showTextDocument(vscode.Uri.file(p));
+    const p = claudeWrites('hover/a.ts', 'a\nb\nc\nd\n', 'a\nc\nD\n');
+    await pending(p, 2);
+    const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
     await sleep(500);
     assert.equal(api.controller.insets.insetCount, 0);
+    assert.equal(api.controller.insets.changeButtonCount, 0);
+    // Without insets, Keep / Undo / Ask Claude fall back to CodeLens links on the line after each change
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', ed.document.uri);
+    const keeps = lenses.filter((l) => l.command?.command === 'ccReview.keepHunk');
+    assert.deepEqual(
+      keeps.map((l) => l.range.start.line),
+      [1, 3],
+    );
+    assert.ok(lenses.every((l) => !l.command?.title.startsWith('Claude ')), 'no "Claude 1/2 ..." summary');
   } finally {
     await c.update('phantomLines', undefined, vscode.ConfigurationTarget.Global);
   }
@@ -490,17 +515,17 @@ test('grouping by round attributes each hunk to its round; Keep / Undo a round; 
   }
 });
 
-test('CodeLens shows which round each hunk came from', async () => {
+test('the Claude Changes list shows which message each change came from', async () => {
   const p = path.join(WS, 'rounds/lens.ts');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, 'x\ny\n');
   store.write({ path: p, existed: true, ts: Date.now(), sessions: ['it-session'] }, Buffer.from('x\ny\n'));
   claudeRound(p, 'it-lens', 'Add a line to lens.ts', 'x\nnew\ny\n');
-  await pending(p, 1);
-  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
-  await waitForAsync('the message summary in the CodeLens', async () => {
-    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', ed.document.uri);
-    return lenses.some((l) => l.command?.title.includes('"Add a line to lens.ts"'));
+  const pf = await pending(p, 1);
+  const tree = api.controller.tree!;
+  await waitFor('the message in the change tooltip', () => {
+    const tip = tree.getTreeItem({ type: 'hunk', path: p, hunkId: pf.hunks[0].id }).tooltip;
+    return tip instanceof vscode.MarkdownString && tip.value.includes('From your message: Add a line to lens');
   });
 });
 
