@@ -32,7 +32,11 @@ fs.copyFileSync('node_modules/vscode-oniguruma/release/onig.wasm', 'dist/onig.wa
 
 // vsce only packages files inside this folder, but README and LICENSE live at the repository root
 if (production) {
-  for (const f of ['README.md', 'LICENSE']) fs.copyFileSync(`../${f}`, f);
+  fs.copyFileSync('../LICENSE', 'LICENSE');
+  // GitHub shows the #gh-light-mode-only or #gh-dark-mode-only image by its theme; VS Code would show both, so keep the light one
+  const readme = fs.readFileSync('../README.md', 'utf8');
+  const lines = readme.split('\n').filter((l) => !l.includes('#gh-dark-mode-only'));
+  fs.writeFileSync('README.md', lines.join('\n').replaceAll('#gh-light-mode-only', ''));
 }
 
 if (watch) {
