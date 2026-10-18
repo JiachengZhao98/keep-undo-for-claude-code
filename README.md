@@ -1,6 +1,15 @@
 # Claude Code Review (Keep / Undo)
 
+[![Release](https://img.shields.io/github/v/release/JiachengZhao98/keep-undo-for-claude-code)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest)
+[![CI](https://github.com/JiachengZhao98/keep-undo-for-claude-code/actions/workflows/ci.yml/badge.svg)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/JiachengZhao98/keep-undo-for-claude-code)](https://github.com/JiachengZhao98/keep-undo-for-claude-code/blob/main/LICENSE)
+
 Review the files Claude Code edits change by change, the way Copilot does: added lines on a green background, deleted lines shown as red "phantom" lines highlighted with your theme, and Keep, Undo and Ask Claude buttons below every change. Claude writes to disk as usual and you review afterwards. You can group changes by the prompt that produced them, and ask Claude about any single change.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/editor-dark.png">
+  <img src="https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/editor-light.png" alt="A file in VS Code with Claude's changes: added lines in green, deleted lines in red, a Keep / Undo bar for the whole file at the top, and blue Keep, red Undo and orange Ask Claude buttons below each change">
+</picture>
 
 There is one rule: a file is pending as long as it differs from its baseline. Keep updates the baseline; Undo updates the file.
 
@@ -30,6 +39,11 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
 ## Usage
 
 When Claude finishes responding, a notification lists the files it changed in that turn: **Review** opens the Claude Changes view (in the Source Control sidebar) and the first changed file; **Keep All** / **Undo All** act on that turn's changes. It stays on screen until you close it; VS Code only keeps error notifications on screen, so it carries an error icon (turn off `ccReview.keepSummaryOnScreen` for a regular notification that hides after 10 seconds). The status bar item "Claude: N files · M changes" and the Claude Changes view show everything still pending at any time.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/turn-dark.png">
+  <img src="https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/turn-light.png" alt="The notification shown when Claude finishes a turn, with Review, Keep All and Undo All buttons, next to the Claude Changes list in the Source Control sidebar">
+</picture>
 
 Every way Claude changes files is tracked: the Edit, Write, MultiEdit and NotebookEdit tools, and shell commands. Before a shell command runs, the folders it may touch are snapshotted (its starting directory, the project, every `cd` target and every path it names) and compared with the result afterwards. Inside a git repository this uses git, so only untracked files are copied. A folder outside git with more than 10,000 files is only tracked for the files a command names. Read-only commands such as `ls`, `grep` and `git status` are skipped. A file you save in VS Code while a command runs counts as yours, not Claude's.
 
