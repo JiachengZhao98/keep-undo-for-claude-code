@@ -8,14 +8,14 @@ There is one rule: a file is pending as long as it differs from its baseline. Ke
 
 Requires VS Code 1.140 or later (the stable release is fine; Insiders is not needed) and Node (for the hooks).
 
-1. Build and install the extension:
+1. Download the extension from the [latest release](https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest) and install it:
 
    ```sh
-   cd cc-review
-   npm install
-   npm run package
-   code --install-extension cc-review-0.5.0.vsix
+   curl -fLO https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest/download/cc-review.vsix
+   code --install-extension cc-review.vsix
    ```
+
+   If `code` is not found, run **Shell Command: Install 'code' command in PATH** from the Command Palette. To build the extension yourself instead, run `npm install` and `npm run package` in `cc-review/` and install the `.vsix` file it creates.
 
 2. Allow the proposed API: run **Preferences: Configure Runtime Arguments** from the Command Palette, add this line to `argv.json`, then quit VS Code completely and reopen it:
 
@@ -126,6 +126,8 @@ npm run package            # build the VSIX
 ```
 
 GitHub Actions runs the typecheck and the unit tests on every push to `main` and `develop` and on every pull request (`.github/workflows/ci.yml`). The integration tests need a desktop VS Code, so run them locally.
+
+To release a version: set it in `cc-review/package.json`, merge to `main`, then push a matching tag such as `v0.5.0`. The release workflow (`.github/workflows/release.yml`) runs the tests, builds the extension and publishes it as a GitHub release with `cc-review.vsix` attached.
 
 Open the `cc-review` folder in VS Code and press F5 to launch the Extension Development Host (`cc-review/.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
 

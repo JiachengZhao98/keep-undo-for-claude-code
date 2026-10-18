@@ -616,17 +616,15 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
     <div class="wrap">
       <div class="band-head">
         <span class="eyebrow">Install</span>
-        <h2>Three steps, about five minutes</h2>
+        <h2>Three steps, about two minutes</h2>
         <p>You need VS Code 1.140 or later (the regular release, not Insiders), Node.js and Claude Code.</p>
       </div>
       <ol class="install">
         <li>
-          <h3>Build and install the extension</h3>
-          <div class="snippet"><pre id="s1">git clone https://github.com/JiachengZhao98/keep-undo-for-claude-code.git
-cd keep-undo-for-claude-code/cc-review
-npm install
-npm run package
-code --install-extension cc-review-0.5.0.vsix</pre><button class="copy" type="button" data-copy="s1">Copy</button></div>
+          <h3>Download and install the extension</h3>
+          <div class="snippet"><pre id="s1">curl -fLO https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest/download/cc-review.vsix
+code --install-extension cc-review.vsix</pre><button class="copy" type="button" data-copy="s1">Copy</button></div>
+          <p>Or download <code>cc-review.vsix</code> from the <a href="https://github.com/JiachengZhao98/keep-undo-for-claude-code/releases/latest">latest release</a> and run <strong>Extensions: Install from VSIX…</strong>. To build it yourself, run <code>npm install</code> and <code>npm run package</code> in <code>cc-review/</code>.</p>
         </li>
         <li>
           <h3>Allow the inline red lines</h3>
