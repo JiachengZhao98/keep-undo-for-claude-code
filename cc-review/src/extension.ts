@@ -121,9 +121,12 @@ export class Controller implements vscode.Disposable {
     this.highlighter = new SyntaxHighlighter(vscode.Uri.joinPath(ctx.extensionUri, 'dist', 'onig.wasm').fsPath, (m) => this.out.info(m));
     this.insets.highlighting = this.highlighter;
     this.insets.askEnabled = this.askEnabled;
+    this.insets.fileButtons = cfg().get<boolean>('fileButtons', true);
+    this.insets.changeButtons = cfg().get<boolean>('changeButtons', true);
     this.codeLens = new HunkCodeLens(this.model, this.idx, {
-      roundTitle: (pf, hunkId) => this.roundService.title(this.roundService.roundOf(pf, hunkId)),
       askEnabled: () => this.askEnabled,
+      fileButtonsShown: () => this.fileButtonsShown(),
+      changeButtonsShown: () => this.insetsShown() && this.insets.changeButtons,
     });
     this.badges = new PendingBadges(this.model, this.idx);
     this.baselines = new BaselineProvider(this.store, this.idx);
@@ -437,7 +440,19 @@ export class Controller implements vscode.Disposable {
     );
   }
 
+  /** Whether editor insets are in use (the proposed API is enabled and phantomLines is not "hover") */
+  private insetsShown(): boolean {
+    return this.insets.isAvailable && cfg().get<string>('phantomLines') !== 'hover';
+  }
+
+  /** Whether pending files get the colored Keep / Undo bar (which then replaces the file-level CodeLens) */
+  private fileButtonsShown(): boolean {
+    return this.insetsShown() && this.insets.fileButtons;
+  }
+
   private onConfigChanged(e: vscode.ConfigurationChangeEvent): void {
+    this.insets.fileButtons = cfg().get<boolean>('fileButtons', true);
+    this.insets.changeButtons = cfg().get<boolean>('changeButtons', true);
     if (e.affectsConfiguration('ccReview.maxFileSizeKB')) {
       this.model.opts.maxBytes = (cfg().get<number>('maxFileSizeKB') ?? 1024) * 1024;
       for (const f of this.model.getFiles()) this.scheduleRefresh(f.path, 0);
@@ -498,7 +513,7 @@ export class Controller implements vscode.Disposable {
     const pf = this.model.getFile(p);
     // The model has not caught up with the latest edit (debouncing): keep the decorations VS Code already shifted, repaint after recomputing
     if (!force && pf && pf.docVersion !== undefined && pf.docVersion !== ed.document.version) return;
-    const useInsets = this.insets.isAvailable && cfg().get<string>('phantomLines') !== 'hover';
+    const useInsets = this.insetsShown();
     this.painter.paint(ed, pf, !useInsets, this.askEnabled);
     if (useInsets) this.insets.update(ed, pf, cfg().get<number>('maxInsetsPerEditor') ?? 20);
     else this.insets.clear(ed);
@@ -816,10 +831,12 @@ export class Controller implements vscode.Disposable {
       await this.askClaude([a.path, a.hunkId]);
       return;
     }
-    if (a.action === 'keep') await this.keepHunk([a.path, a.hunkId]);
+    if (a.action === 'keepFile') await this.keepFile(a.path);
+    else if (a.action === 'undoFile') await this.undoFile(a.path);
+    else if (a.action === 'keep') await this.keepHunk([a.path, a.hunkId]);
     else await this.undoHunk([a.path, a.hunkId]);
-    // Clicking a button in the webview leaves focus there; give it back to the editor
-    if (vscode.window.visibleTextEditors.includes(a.editor)) {
+    // Clicking a button in the webview leaves focus there; give it back to the editor (unless Undo deleted the file)
+    if (vscode.window.visibleTextEditors.includes(a.editor) && fs.existsSync(a.path)) {
       await vscode.window.showTextDocument(a.editor.document, { viewColumn: a.editor.viewColumn, preserveFocus: false });
     }
   }

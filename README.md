@@ -1,6 +1,6 @@
 # Claude Code Review (Keep / Undo)
 
-Review the files Claude Code edits change by change, the way Copilot does: added lines on a green background, deleted lines shown as red "phantom" lines highlighted with your theme, and Keep | Undo above every change. Claude writes to disk as usual and you review afterwards. You can group changes by the prompt that produced them, and ask Claude about any single change.
+Review the files Claude Code edits change by change, the way Copilot does: added lines on a green background, deleted lines shown as red "phantom" lines highlighted with your theme, and Keep, Undo and Ask Claude buttons below every change. Claude writes to disk as usual and you review afterwards. You can group changes by the prompt that produced them, and ask Claude about any single change.
 
 There is one rule: a file is pending as long as it differs from its baseline. Keep updates the baseline; Undo updates the file.
 
@@ -14,7 +14,7 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
    cd cc-review
    npm install
    npm run package
-   code --install-extension cc-review-0.3.0.vsix
+   code --install-extension cc-review-0.5.0.vsix
    ```
 
 2. Allow the proposed API: run **Preferences: Configure Runtime Arguments** from the Command Palette, add this line to `argv.json`, then quit VS Code completely and reopen it:
@@ -23,7 +23,7 @@ Requires VS Code 1.140 or later (the stable release is fine; Insiders is not nee
    "enable-proposed-api": ["local.cc-review"]
    ```
 
-   Without it the extension still works, but deleted lines are only marked in the gutter and shown on hover.
+   Without it the extension still works, but deleted lines are only marked in the gutter and shown on hover, and the colored Keep / Undo / Ask Claude buttons become plain text links.
 
 3. Install the hooks: the extension offers this on first start, or run **Claude Review: Install Claude Code Hooks** from the Command Palette. It first shows a diff of the change to `~/.claude/settings.json` and writes only after you confirm. It only appends 6 hooks, leaves your existing settings alone, and backs up the original file as `settings.json.cc-review.bak`. Claude Code picks up the change automatically.
 
@@ -37,12 +37,12 @@ Not tracked: files outside those folders, changes a background command makes aft
 
 | Action | How |
 | --- | --- |
-| Keep / Undo one change | The CodeLens above the change; the buttons at the top right of the phantom lines (shown on hover); ⌃⌥K / ⌃⌥U with the cursor in the change |
+| Keep / Undo one change | The blue **Keep** and red **Undo** buttons below the change; the matching blue and red icons on the change's row in the Claude Changes view (shown on hover); ⌃⌥K / ⌃⌥U with the cursor in the change |
 | Previous / next change (across files) | ⌃⌥P / ⌃⌥N, or the arrows in the editor title bar |
-| Keep / Undo a whole file | The buttons in the editor title bar, or on the file's row in the Claude Changes view |
+| Keep / Undo a whole file | The blue **Keep** and red **Undo** buttons above the file's first line; the buttons in the editor title bar; or the ones on the file's row in the Claude Changes view |
 | See all changes | Click "Claude: N files · M changes" in the status bar to open a multi-file diff |
 | Keep / Undo everything | The title bar buttons of the Claude Changes view in the Source Control sidebar |
-| Ask Claude about a change | "Ask Claude" above the change; the button on the phantom lines; ⌃⌥C with the cursor in the change |
+| Ask Claude about a change | The orange **Ask Claude** button below the change, or the orange icon on its row in the Claude Changes view; ⌃⌥C with the cursor in the change |
 | Group by prompt | The clock icon in the Claude Changes view's title bar switches to **Group by Prompt**: each message you sent → files → changes |
 | Keep / Undo everything from one prompt | When grouped by prompt, the buttons on a prompt's row or on a file row under it |
 | See what one prompt changed | The diff button on a prompt's row, or **Show Changes from Recent Prompts** in the view's menu (includes prompts already fully reviewed) |
@@ -52,7 +52,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 - The next time you send Claude a message, the hook tells it which changes you undid, so it does not add them back.
 - For a file Claude created, Undo deletes the file (it moves to the Trash, after you confirm).
 - Phantom lines are colored with the same TextMate grammars and active theme as the editor, and follow theme switches. Deleted lines in the middle of a block comment or template string are colored correctly too.
-- Each change is labeled with the message it came from (the quoted text at the end of its CodeLens). Attribution traces lines through snapshots: if a later prompt edits lines an earlier prompt added, they belong to the later prompt; lines you add yourself between prompts are not counted as Claude's.
+- The Claude Changes view shows which of your messages each change came from: hover a change, or group by prompt. Attribution traces lines through snapshots: if a later prompt edits lines an earlier prompt added, they belong to the later prompt; lines you add yourself between prompts are not counted as Claude's.
 - "Ask Claude" opens Claude Code with `@file#lines` and the change's original content prefilled (prefilled only, not sent), in the session that made the change. If that session is not in the current workspace, it starts a new conversation.
 - A git checkout, a Claude Code rewind, or changing the lines back by hand all take the file off the queue automatically.
 
@@ -62,12 +62,13 @@ Not tracked: files outside those folders, changes a background command makes aft
 | --- | --- | --- |
 | `ccReview.autoKeepUserEdits` | `true` | Merge your edits outside Claude's changes into the baseline automatically |
 | `ccReview.phantomLines` | `inset` | How deleted lines are shown: `inset` (red phantom lines between the code lines) or `hover` |
-| `ccReview.maxInsetsPerEditor` | `20` | Maximum number of phantom line insets in one editor at a time |
+| `ccReview.maxInsetsPerEditor` | `20` | Maximum number of changes per editor that get insets (deleted lines and buttons) at a time; more appear as you scroll |
 | `ccReview.maxFileSizeKB` | `1024` | Larger files can only be kept or undone as a whole |
 | `ccReview.showFilesOutsideWorkspace` | `false` | Also show files outside the workspace that Claude changed |
 | `ccReview.summaryWhenClaudeFinishes` | `true` | When Claude finishes responding, list the files it changed, with Review / Keep All / Undo All |
 | `ccReview.keepSummaryOnScreen` | `true` | Keep that summary on screen until you close it (shown with an error icon, the only kind VS Code keeps) |
-| `ccReview.codeLens` | `true` | Show Keep \| Undo above each change |
+| `ccReview.fileButtons` | `true` | Blue Keep / red Undo buttons for the whole file above its first line (needs the proposed API from step 2) |
+| `ccReview.changeButtons` | `true` | Keep / Undo / Ask Claude buttons below each change (plain CodeLens links when the proposed API is off) |
 | `ccReview.syntaxHighlight` | `true` | Syntax-highlight phantom lines with the active theme |
 | `ccReview.groupBy` | `file` | Group the Claude Changes view by file (`file`) or by prompt (`round`) |
 | `ccReview.nodePath` | auto | Absolute path of the node the hooks run with |
@@ -119,10 +120,12 @@ Prompt text is stored only on your machine, in `~/.cc-review/rounds/` (Claude Co
 cd cc-review
 npm install
 npm run build              # dist/extension.js, dist/hook.js
-npm test                   # unit + hook tests (vitest, 99)
-npm run test:integration   # integration tests in a separate VS Code instance (26)
+npm test                   # unit + hook tests (vitest, 114)
+npm run test:integration   # integration tests in a separate VS Code instance (29)
 npm run package            # build the VSIX
 ```
+
+GitHub Actions runs the typecheck and the unit tests on every push to `main` and `develop` and on every pull request (`.github/workflows/ci.yml`). The integration tests need a desktop VS Code, so run them locally.
 
 Open the `cc-review` folder in VS Code and press F5 to launch the Extension Development Host (`cc-review/.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
 
