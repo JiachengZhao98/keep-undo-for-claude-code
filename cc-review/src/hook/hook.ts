@@ -37,6 +37,7 @@ import {
 import { formatRevertReport, type RevertLine, type RevertRecord } from '../core/reverts';
 import { recordPrompt, recordRoundWrite } from '../core/rounds';
 import {
+  bytesWritten,
   captureFile,
   captureFiles,
   changed,
@@ -50,6 +51,7 @@ import {
   readObject,
   saveIndex,
   SNAPSHOT_EXCLUDES,
+  snapshotBudget,
   type Entry,
   type FileChange,
 } from '../core/snapshot';
@@ -323,6 +325,8 @@ interface BashRecord {
   snaps: FolderSnap[];
   /** Files the command mentions outside those folders: their state before, or null if they did not exist */
   files: Record<string, Entry | null>;
+  /** Bytes of new content the snapshot added to the cache */
+  written?: number;
 }
 
 const MAX_FOLDERS = 6;
@@ -439,6 +443,7 @@ function bashPre(L: Layout, input: HookInput): void {
   for (const f of targets.files) {
     if (!walked.some((d) => isUnder(f, d))) record.files[f] = captureFile(L, f, undefined, deadline) ?? null;
   }
+  record.written = bytesWritten();
   if (record.snaps.length || Object.keys(record.files).length) writeAtomic(bashRecordFile(L, input), JSON.stringify(record));
 }
 
@@ -479,10 +484,9 @@ function bashPost(L: Layout, input: HookInput): void {
   rmQuiet(recFile);
   const saves = userSavesSince(L, record.ts - 2000);
   for (const [abs, before] of changes) recordBashChange(L, input, canonical(abs), before, record.ts, saves, ignored);
-  if (Math.random() < 0.05) {
-    const pending = fs.readdirSync(L.staging).filter((n) => n.startsWith('bash-')).map((n) => readQuiet(path.join(L.staging, n))?.toString() ?? '');
-    gcSnapshots(L, pending);
-  }
+  // Trim the cache now and then, and right away when this command added a lot to it
+  const budget = snapshotBudget(L);
+  if (Math.random() < 0.05 || (record.written ?? 0) + bytesWritten() > budget / 20) gcSnapshots(L, budget);
 }
 
 /** Content hashes of files saved in VS Code since `since`, per path: those changes are the user's, not Claude's */
