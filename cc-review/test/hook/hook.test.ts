@@ -156,6 +156,20 @@ describe('hook pre/post', () => {
   });
 });
 
+describe('hook gc', () => {
+  it('trims the snapshot cache and prints the result for the extension', () => {
+    fs.mkdirSync(L().snapshots, { recursive: true });
+    const stale = path.join(L().snapshots, `${'0'.repeat(40)}.json`);
+    fs.writeFileSync(stale, JSON.stringify({ root: '/gone', ts: 0, files: {} }));
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
+    fs.utimesSync(stale, twoDaysAgo, twoDaysAgo);
+    const r = run('gc', '');
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ dropped: 1, freedBytes: 0, keptBytes: 0 });
+    expect(fs.existsSync(stale)).toBe(false);
+  });
+});
+
 describe('hook stop', () => {
   it('appends a turn-end event and prints nothing', () => {
     fs.mkdirSync(home, { recursive: true });
@@ -258,6 +272,28 @@ describe('hook bash', () => {
     expect(base(path.join(proj, 'notes.md'))).toBe('one\n');
     expect(meta(path.join(proj, 'fresh.txt'))).toMatchObject({ existed: false });
     expect(hasBaseline(path.join(proj, 'node_modules/x/index.js'))).toBe(false);
+  });
+
+  it('keeps snapshot contents compressed and restores them exactly', () => {
+    const source = 'export const value = "the same line again";\n'.repeat(300);
+    fs.writeFileSync(path.join(proj, 'big.ts'), source);
+    bash('./generate.sh', proj, () => fs.writeFileSync(path.join(proj, 'big.ts'), 'replaced\n'));
+    expect(base(path.join(proj, 'big.ts'))).toBe(source);
+    const stored = fs.readdirSync(path.join(L().snapshots, 'objects'), { recursive: true }) as string[];
+    expect(stored.some((n) => n.endsWith('.br'))).toBe(true);
+  });
+
+  it('trims the snapshot cache right after a command stores a lot', () => {
+    fs.mkdirSync(L().snapshots, { recursive: true });
+    const stale = path.join(L().snapshots, `${'0'.repeat(40)}.json`);
+    fs.writeFileSync(stale, JSON.stringify({ root: '/gone', ts: 0, files: {} }));
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
+    fs.utimesSync(stale, twoDaysAgo, twoDaysAgo);
+    // 3 MB of incompressible content is more than a twentieth of a 50 MB budget
+    fs.writeFileSync(L().config, JSON.stringify({ snapshotCacheMB: 50 }));
+    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(proj, `blob${i}.bin`), crypto.randomBytes(1_000_000));
+    bash('./process.sh', proj, () => fs.writeFileSync(path.join(proj, 'out.txt'), 'x\n'));
+    expect(fs.existsSync(stale)).toBe(false);
   });
 
   it('follows `cd` into a repository from a folder outside it', () => {

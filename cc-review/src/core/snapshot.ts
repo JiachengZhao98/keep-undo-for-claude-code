@@ -1,9 +1,10 @@
 // Before/after snapshots for files changed by shell commands. Contents are stored once, addressed by
-// SHA-1, in snapshots/objects/; snapshots/<key>.json caches each folder's file sizes, mtimes and hashes
-// so that unchanged files are not read again. Node built-ins only (used by the hook).
+// SHA-1 and compressed, in snapshots/objects/; snapshots/<key>.json caches each folder's file sizes,
+// mtimes and hashes so that unchanged files are not read again. Node built-ins only (used by the hook).
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as zlib from 'node:zlib';
 import { readJsonQuiet, readQuiet, rmQuiet, writeAtomic } from './fsutil';
 import { DEFAULT_IGNORE, matchRules, parseIgnore, type IgnoreRule } from './ignore';
 import { isUnder, pathKey, type Layout } from './paths';
@@ -16,8 +17,16 @@ export const MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024;
 export const MAX_FOLDER_FILES = Number(process.env.CC_REVIEW_MAX_FOLDER_FILES) || 10_000;
 /** A folder found too large is not walked again for this long */
 const TOO_BIG_TTL_MS = 3600_000;
+/** Contents and folder indexes this recent are never removed: a command may be using them */
 const OBJECT_GRACE_MS = 10 * 60_000;
-const INDEX_TTL_MS = 7 * 24 * 3600_000;
+/** A folder index unused for this long is dropped; it only saves the next command from reading unchanged files */
+const INDEX_TTL_MS = 24 * 3600_000;
+/** Default disk budget of the cache (ccReview.snapshotCacheMB) */
+export const DEFAULT_CACHE_MB = 500;
+const MIN_CACHE_MB = 50;
+const MB = 1024 * 1024;
+/** Compressed contents carry this suffix; contents stored as-is (incompressible, or from older versions) have none */
+const BROTLI = '.br';
 
 /** Generated, vendored and tool folders that are not walked (a .ccreviewignore can re-include them with !name) */
 export const SNAPSHOT_EXCLUDES = [
@@ -38,7 +47,10 @@ const indexFile = (L: Layout, root: string) => path.join(L.snapshots, `${pathKey
 const objectFile = (L: Layout, hash: string) => path.join(L.snapshots, 'objects', hash.slice(0, 2), hash);
 
 export function loadIndex(L: Layout, root: string): FolderIndex {
-  const idx = readJsonQuiet<FolderIndex>(indexFile(L, root));
+  const file = indexFile(L, root);
+  // Mark it as in use, so cleanup does not drop it while this command relies on it
+  touch(file);
+  const idx = readJsonQuiet<FolderIndex>(file);
   return idx && idx.root === root && idx.files ? idx : { root, ts: Date.now(), files: {} };
 }
 
@@ -52,12 +64,48 @@ export function isTooBig(idx: FolderIndex): boolean {
 }
 
 export function readObject(L: Layout, hash: string | null): Buffer | undefined {
-  return hash ? readQuiet(objectFile(L, hash)) : undefined;
+  if (!hash) return undefined;
+  const obj = objectFile(L, hash);
+  const packed = readQuiet(obj + BROTLI);
+  if (packed) {
+    try {
+      return zlib.brotliDecompressSync(packed);
+    } catch {
+      // Damaged: fall back to a copy stored as-is, if any
+    }
+  }
+  return readQuiet(obj);
 }
 
 export function contentHash(data: Uint8Array): string {
   return crypto.createHash('sha1').update(data).digest('hex');
 }
+
+function touch(file: string): boolean {
+  try {
+    const now = new Date();
+    fs.utimesSync(file, now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Brotli at its fastest quality: source code shrinks to about a third at roughly 170 MB/s (gzip -1
+ * compresses as well at about 100 MB/s). Undefined when it saves too little, e.g. images or archives.
+ */
+function compress(data: Buffer): Buffer | undefined {
+  if (data.length < 512) return undefined;
+  const packed = zlib.brotliCompressSync(data, {
+    params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 1, [zlib.constants.BROTLI_PARAM_SIZE_HINT]: data.length },
+  });
+  return packed.length < data.length * 0.9 ? packed : undefined;
+}
+
+/** Bytes of new content this process has stored (the hook handles one command per process) */
+let written = 0;
+export const bytesWritten = (): number => written;
 
 /** Copy the file into the object store; returns its hash, or null if it is too large or unreadable */
 export function storeContent(L: Layout, abs: string, size: number): string | null {
@@ -70,15 +118,25 @@ export function storeContent(L: Layout, abs: string, size: number): string | nul
   }
   const hash = contentHash(data);
   const obj = objectFile(L, hash);
-  try {
-    // Already stored: refresh its time so cleanup does not remove it while a command still needs it
-    const now = new Date();
-    fs.utimesSync(obj, now, now);
-  } catch {
-    fs.mkdirSync(path.dirname(obj), { recursive: true });
-    writeAtomic(obj, data);
-  }
+  // Already stored: refresh its time so cleanup does not remove it while a command still needs it
+  if (touch(obj + BROTLI) || touch(obj)) return hash;
+  fs.mkdirSync(path.dirname(obj), { recursive: true });
+  const packed = compress(data);
+  if (packed) writeAtomic(obj + BROTLI, packed);
+  else writeAtomic(obj, data);
+  written += (packed ?? data).length;
   return hash;
+}
+
+/** The cache's budget in bytes: ccReview.snapshotCacheMB, which the extension saves to config.json for the hook */
+export function snapshotBudget(L: Layout): number {
+  const mb = readJsonQuiet<{ snapshotCacheMB?: unknown }>(L.config)?.snapshotCacheMB;
+  return (typeof mb === 'number' && Number.isFinite(mb) ? Math.max(mb, MIN_CACHE_MB) : DEFAULT_CACHE_MB) * MB;
+}
+
+export function saveSnapshotBudget(L: Layout, mb: number): void {
+  const config = readJsonQuiet<Record<string, unknown>>(L.config) ?? {};
+  if (config.snapshotCacheMB !== mb) writeAtomic(L.config, JSON.stringify({ ...config, snapshotCacheMB: mb }));
 }
 
 /** Stat one file and store its content; undefined if it is not a regular file */
@@ -214,52 +272,105 @@ export function diffFolder(
   return changes;
 }
 
-/** Delete stored contents no index or pending record refers to, and indexes unused for a week */
-export function gcSnapshots(L: Layout, pendingRecords: readonly string[]): void {
-  const keep = new Set<string>();
-  const now = Date.now();
-  let names: string[] = [];
+export interface SnapshotGc {
+  /** Folder indexes dropped, unused for a day or to meet the budget */
+  dropped: number;
+  freedBytes: number;
+  keptBytes: number;
+}
+
+const mtimeOf = (file: string): number | undefined => fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs;
+
+const readDir = (dir: string): string[] => {
   try {
-    names = fs.readdirSync(L.snapshots);
+    return fs.readdirSync(dir);
   } catch {
-    return;
+    return [];
   }
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue;
+};
+
+/**
+ * Keep the cache within its budget. It is only a cache: a running command needs the contents its
+ * record refers to, while folder indexes just spare the next command from reading unchanged files.
+ * 1. Drop folder indexes unused for a day.
+ * 2. While over budget, drop the least recently used index. Indexes used in the last 10 minutes stay:
+ *    loading an index marks it, and a command may still rely on it.
+ * 3. Delete contents that no index or pending command refers to, unless stored in the last 10
+ *    minutes (a command may have stored them without saving its index yet).
+ */
+export function gcSnapshots(L: Layout, budget = snapshotBudget(L), now = Date.now()): SnapshotGc {
+  const result: SnapshotGc = { dropped: 0, freedBytes: 0, keptBytes: 0 };
+  const recent = (mtime: number) => now - mtime < OBJECT_GRACE_MS;
+  /** A temp file left by a crashed write: removed once old enough */
+  const leftover = (file: string): boolean => {
+    if (!file.endsWith('.tmp')) return false;
+    if (!recent(mtimeOf(file) ?? now)) rmQuiet(file);
+    return true;
+  };
+
+  const indexes: Array<{ file: string; used: number; hashes: Set<string> }> = [];
+  for (const name of readDir(L.snapshots)) {
     const file = path.join(L.snapshots, name);
-    try {
-      if (now - fs.statSync(file).mtimeMs > INDEX_TTL_MS) {
-        rmQuiet(file);
-        continue;
-      }
-    } catch {
+    if (leftover(file) || !name.endsWith('.json')) continue;
+    const used = mtimeOf(file);
+    if (used === undefined) continue;
+    if (now - used > INDEX_TTL_MS) {
+      rmQuiet(file);
+      result.dropped++;
       continue;
     }
-    for (const e of Object.values(readJsonQuiet<FolderIndex>(file)?.files ?? {})) if (e[2]) keep.add(e[2]);
+    const hashes = new Set<string>();
+    for (const e of Object.values(readJsonQuiet<FolderIndex>(file)?.files ?? {})) if (e[2]) hashes.add(e[2]);
+    indexes.push({ file, used, hashes });
   }
-  for (const rec of pendingRecords) for (const m of rec.matchAll(/"([0-9a-f]{40})"/g)) keep.add(m[1]);
-  const objects = path.join(L.snapshots, 'objects');
-  let shards: string[] = [];
-  try {
-    shards = fs.readdirSync(objects);
-  } catch {
-    return;
+
+  // Contents that pending shell commands (staging/bash-<id>.json) still need
+  const pending = new Set<string>();
+  for (const name of readDir(L.staging)) {
+    if (!name.startsWith('bash-')) continue;
+    for (const m of (readQuiet(path.join(L.staging, name))?.toString() ?? '').matchAll(/"([0-9a-f]{40})"/g)) pending.add(m[1]);
   }
-  for (const shard of shards) {
-    let hashes: string[] = [];
-    try {
-      hashes = fs.readdirSync(path.join(objects, shard));
-    } catch {
-      continue;
+
+  const objects = new Map<string, { files: string[]; bytes: number; recent: boolean }>();
+  const objectsDir = path.join(L.snapshots, 'objects');
+  for (const shard of readDir(objectsDir)) {
+    for (const name of readDir(path.join(objectsDir, shard))) {
+      const file = path.join(objectsDir, shard, name);
+      if (leftover(file)) continue;
+      const st = fs.statSync(file, { throwIfNoEntry: false });
+      if (!st) continue;
+      const hash = name.endsWith(BROTLI) ? name.slice(0, -BROTLI.length) : name;
+      const o = objects.get(hash) ?? { files: [], bytes: 0, recent: false };
+      o.files.push(file);
+      // Space taken on disk: a small file still fills a whole block
+      o.bytes += st.blocks ? st.blocks * 512 : st.size;
+      o.recent ||= recent(st.mtimeMs);
+      objects.set(hash, o);
     }
-    for (const h of hashes) {
-      if (keep.has(h)) continue;
-      const f = path.join(objects, shard, h);
-      try {
-        if (now - fs.statSync(f).mtimeMs > OBJECT_GRACE_MS) rmQuiet(f);
-      } catch {
-        // Already gone
-      }
+  }
+
+  const refs = new Map<string, number>();
+  for (const idx of indexes) for (const h of idx.hashes) refs.set(h, (refs.get(h) ?? 0) + 1);
+  const needed = (h: string) => (refs.get(h) ?? 0) > 0 || pending.has(h) || !!objects.get(h)?.recent;
+  for (const [h, o] of objects) if (needed(h)) result.keptBytes += o.bytes;
+
+  indexes.sort((a, b) => a.used - b.used);
+  for (const idx of indexes) {
+    if (result.keptBytes <= budget || recent(idx.used)) break;
+    // A command may have started using it since it was read
+    if (mtimeOf(idx.file) !== idx.used) continue;
+    rmQuiet(idx.file);
+    result.dropped++;
+    for (const h of idx.hashes) {
+      refs.set(h, refs.get(h)! - 1);
+      if (!needed(h)) result.keptBytes -= objects.get(h)?.bytes ?? 0;
     }
   }
+
+  for (const [h, o] of objects) {
+    if (needed(h)) continue;
+    for (const f of o.files) rmQuiet(f);
+    result.freedBytes += o.bytes;
+  }
+  return result;
 }

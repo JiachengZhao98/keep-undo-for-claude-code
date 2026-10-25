@@ -17,6 +17,7 @@ export interface Layout {
   hookLog: string;
   hookScript: string;
   ignoreFile: string;
+  config: string; // Written by the extension: settings the hook needs (the snapshot cache budget)
 }
 
 export function reviewRoot(): string {
@@ -37,6 +38,7 @@ export function layoutOf(root = reviewRoot()): Layout {
     hookLog: path.join(root, 'hook.log'),
     hookScript: path.join(root, 'hook.js'),
     ignoreFile: path.join(root, '.ccreviewignore'),
+    config: path.join(root, 'config.json'),
   };
 }
 

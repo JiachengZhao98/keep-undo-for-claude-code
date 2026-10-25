@@ -41,6 +41,8 @@ interface Entry {
   /** Holds a change's Keep / Undo / Ask Claude buttons */
   buttons: boolean;
   disposed: boolean;
+  /** Recompute the deleted lines' colors and send them to the webview */
+  recolor?: () => void;
 }
 
 interface Wanted {
@@ -81,6 +83,10 @@ export class PhantomInsets implements vscode.Disposable {
   readonly metrics: InsetMetrics[] = [];
   /** Number of colored spans each inset reports after highlighting (for tests and debugging) */
   readonly highlighted: number[] = [];
+  /** Insets created so far, file bars included (for tests and debugging) */
+  created = 0;
+  /** Times an inset reported its colors, including after a recolor (for tests) */
+  highlightReports = 0;
   highlighting: Highlighting | undefined;
   /** Show the "Ask Claude" button when the Claude Code extension is installed */
   askEnabled = false;
@@ -154,51 +160,49 @@ export class PhantomInsets implements vscode.Disposable {
     }
   }
 
+  /**
+   * Bring an editor's insets in line with its file's changes. Insets are created as their change comes
+   * within one screen of the visible range, nearest first, and then kept while the editor stays open:
+   * VS Code runs each inset's webview in a renderer process of its own and frees it only when the
+   * editor closes, so disposing an inset that scrolled away saves nothing, and recreating it later
+   * starts another process. `maxInsets` caps the insets per editor (the file bar not counted).
+   */
   update(editor: vscode.TextEditor, pf: PendingFile | undefined, maxInsets: number): void {
     if (!this.available) return;
-    const want = new Map<string, Wanted>();
+    // Every inset the file's changes call for, by key
+    const specs = new Map<string, Wanted>();
     if (pf && pf.kind === 'text' && !pf.missing) {
-      // Only create insets for hunks within one screen of the visible range, capped per editor; more are added on scroll
-      const ranges = editor.visibleRanges;
-      const top = ranges.length ? ranges[0].start.line : 0;
-      const bottom = ranges.length ? ranges[ranges.length - 1].end.line : 0;
-      const span = Math.max(bottom - top, 30);
-      const center = (top + bottom) / 2;
       const tabSize = typeof editor.options.tabSize === 'number' ? editor.options.tabSize : 4;
-      pf.hunks
-        .filter((h) => (h.removed.length > 0 || this.changeButtons) && h.curStart >= top - span && h.curStart <= bottom + span + 1)
-        .sort((a, b) => Math.abs(a.curStart - center) - Math.abs(b.curStart - center))
-        .slice(0, maxInsets)
-        .forEach((hunk) => {
-          if (hunk.removed.length > 0) {
-            const truncated = hunk.removed.length > MAX_LINES_PER_INSET;
-            const lines = truncated
-              ? [...hunk.removed.slice(0, MAX_LINES_PER_INSET - 1), `… ${plural(hunk.removed.length - MAX_LINES_PER_INSET + 1, 'more line')}`]
-              : hunk.removed;
-            // A pure deletion has no lines of its own below the red ones, so its buttons go in the same inset;
-            // one inset keeps them in order (two insets on the same line can swap when one is rebuilt)
-            const buttons = this.changeButtons && hunk.added === 0;
-            // An inset appears below `line`. The deletion is right before curStart, so anchor at curStart - 1 (-1 at the top of the file)
-            want.set(hunk.id, {
-              hunk,
-              line: hunk.curStart - 1,
-              lines,
-              code: truncated ? MAX_LINES_PER_INSET - 1 : lines.length,
-              buttons,
-              sig: hash53(lines.join('\n') + '\u0000' + tabSize + '\u0000' + (buttons ? `buttons:${this.askEnabled}` : '')),
-            });
-          }
-          if (this.changeButtons && hunk.added > 0) {
-            // Below the last line of the change
-            want.set(hunk.id + BUTTONS, { hunk, line: hunk.curStart + hunk.added - 1, lines: [], code: 0, buttons: true, sig: `buttons:${this.askEnabled}` });
-          }
-        });
+      for (const hunk of pf.hunks) {
+        if (hunk.removed.length > 0) {
+          const truncated = hunk.removed.length > MAX_LINES_PER_INSET;
+          const lines = truncated
+            ? [...hunk.removed.slice(0, MAX_LINES_PER_INSET - 1), `… ${plural(hunk.removed.length - MAX_LINES_PER_INSET + 1, 'more line')}`]
+            : hunk.removed;
+          // A pure deletion has no lines of its own below the red ones, so its buttons go in the same inset;
+          // one inset keeps them in order (two insets on the same line can swap when one is rebuilt)
+          const buttons = this.changeButtons && hunk.added === 0;
+          // An inset appears below `line`. The deletion is right before curStart, so anchor at curStart - 1 (-1 at the top of the file)
+          specs.set(hunk.id, {
+            hunk,
+            line: hunk.curStart - 1,
+            lines,
+            code: truncated ? MAX_LINES_PER_INSET - 1 : lines.length,
+            buttons,
+            sig: hash53(lines.join('\n') + '\u0000' + tabSize + '\u0000' + (buttons ? `buttons:${this.askEnabled}` : '')),
+          });
+        }
+        if (this.changeButtons && hunk.added > 0) {
+          // Below the last line of the change
+          specs.set(hunk.id + BUTTONS, { hunk, line: hunk.curStart + hunk.added - 1, lines: [], code: 0, buttons: true, sig: `buttons:${this.askEnabled}` });
+        }
+      }
     }
 
     const summary = this.fileButtons && pf && !pf.missing ? fileChangeSummary(pf) : undefined;
     let entries = this.byEditor.get(editor);
     if (!entries) {
-      if (want.size === 0 && summary === undefined) return;
+      if (specs.size === 0 && summary === undefined) return;
       entries = new Map();
       this.byEditor.set(editor, entries);
     }
@@ -217,21 +221,44 @@ export class PhantomInsets implements vscode.Disposable {
       if (!this.available) return this.disposeAll();
       if (entry) entries.set(FILE_BAR, entry);
     }
-    // Only touch the insets that changed, to avoid flicker
+    // Dispose only the insets whose change is gone or different (kept, undone, edited)
     for (const [id, e] of [...entries]) {
       if (id === FILE_BAR) continue;
-      const w = want.get(id);
+      const w = specs.get(id);
       if (!w || e.dirty || e.line !== w.line || e.height !== heightOf(w) || e.sig !== w.sig) {
         entries.delete(id);
         e.inset.dispose();
       }
     }
-    for (const [id, w] of want) {
-      if (entries.has(id)) continue;
+
+    // Create the missing insets within one screen of the visible range, nearest first
+    const ranges = editor.visibleRanges;
+    const top = ranges.length ? ranges[0].start.line : 0;
+    const bottom = ranges.length ? ranges[ranges.length - 1].end.line : 0;
+    const span = Math.max(bottom - top, 30);
+    const center = (top + bottom) / 2;
+    const distance = (line: number) => Math.abs(line - center);
+    const missing = [...specs]
+      .filter(([id, w]) => !entries.has(id) && w.line >= top - span - 1 && w.line <= bottom + span + 1)
+      .sort(([, a], [, b]) => distance(a.line) - distance(b.line));
+    for (const [id, w] of missing) {
+      if (entries.size - (entries.has(FILE_BAR) ? 1 : 0) >= maxInsets) {
+        // At the cap: make room by dropping the inset farthest from view, if it is farther than this one
+        let far: [string, Entry] | undefined;
+        for (const [k, e] of entries) if (k !== FILE_BAR && (!far || distance(e.line) > distance(far[1].line))) far = [k, e];
+        if (!far || distance(far[1].line) <= distance(w.line)) break;
+        entries.delete(far[0]);
+        far[1].inset.dispose();
+      }
       const entry = this.create(editor, pf!, w, id);
       if (!this.available) return this.disposeAll();
       if (entry) entries.set(id, entry);
     }
+  }
+
+  /** Recolor the deleted lines in place (after a theme switch or a change to ccReview.syntaxHighlight) instead of rebuilding them */
+  recolorAll(): void {
+    for (const entries of this.byEditor.values()) for (const e of entries.values()) e.recolor?.();
   }
 
   private create(editor: vscode.TextEditor, pf: PendingFile, w: Wanted, id: string): Entry | undefined {
@@ -250,6 +277,7 @@ export class PhantomInsets implements vscode.Disposable {
       }
       return undefined;
     }
+    this.created++;
     const entry: Entry = { inset, line: w.line, height: heightOf(w), sig: w.sig, dirty: false, ready: false, disposed: false, buttons: w.buttons };
     const languageId = editor.document.languageId;
     // If the file is already tokenized, embed colors now; otherwise draw plain text and send colors when ready
@@ -269,12 +297,17 @@ export class PhantomInsets implements vscode.Disposable {
           tokens,
         )
       : renderChangeButtons(this.askEnabled);
-    if (!tokens && hl) {
-      void hl.highlight(pf.path, pf.baseHash, languageId, pf.baseLines, w.hunk.baseStart, w.code).then((spans) => {
-        if (!spans || entry.disposed) return;
-        if (entry.ready) void inset.webview.postMessage({ cmd: 'tokens', lines: spans });
-        else entry.pendingTokens = spans;
-      });
+    if (hl) {
+      // On a recolor, plain text replaces old colors when highlighting is now off or the theme has no colors
+      const color = (plainIfNone: boolean) =>
+        void hl.highlight(pf.path, pf.baseHash, languageId, pf.baseLines, w.hunk.baseStart, w.code).then((found) => {
+          const spans = found ?? (plainIfNone ? w.lines.slice(0, w.code).map((l): StyledSpan[] => [[l, null, 0]]) : undefined);
+          if (!spans || entry.disposed) return;
+          if (entry.ready) void inset.webview.postMessage({ cmd: 'tokens', lines: spans });
+          else entry.pendingTokens = spans;
+        });
+      if (!tokens) color(false);
+      entry.recolor = () => color(true);
     }
     inset.webview.onDidReceiveMessage(
       (msg: { cmd?: string; h?: number; lineH?: number; fontFamily?: string; fontSize?: string; colored?: number }) => {
@@ -297,6 +330,7 @@ export class PhantomInsets implements vscode.Disposable {
             }
             break;
           case 'highlighted':
+            this.highlightReports++;
             if (this.highlighted.length < 200) this.highlighted.push(msg.colored ?? 0);
             break;
         }
@@ -326,6 +360,7 @@ export class PhantomInsets implements vscode.Disposable {
       }
       return undefined;
     }
+    this.created++;
     const entry: Entry = { inset, line: -1, height: FILE_BAR_LINES, sig: '', dirty: false, ready: false, disposed: false, buttons: false, summary };
     inset.webview.html = renderFileBar(summary, !pf.existed);
     inset.webview.onDidReceiveMessage((msg: { cmd?: string }) => {

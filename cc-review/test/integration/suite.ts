@@ -141,6 +141,125 @@ test('creation time with 50 insets at once', async () => {
   insets.forEach((i) => i.dispose());
 });
 
+/** Physical memory footprint of each process in KB, as Activity Monitor and top report it (macOS) */
+function footprints(): Map<number, number> {
+  const unit: Record<string, number> = { B: 1 / 1024, K: 1, M: 1024, G: 1024 * 1024 };
+  const out = new Map<number, number>();
+  for (const line of execFileSync('top', ['-l', '1', '-stats', 'pid,mem'], { encoding: 'utf8' }).split('\n')) {
+    const m = /^\s*(\d+)\s+([\d.]+)([BKMG])\+?\s*$/.exec(line);
+    if (m) out.set(Number(m[1]), Number(m[2]) * unit[m[3]]);
+  }
+  return out;
+}
+
+/**
+ * Memory of this VS Code instance in MB: its main process and every process under it (renderers,
+ * GPU, extension host). `mb` is the physical footprint (shared memory counted once); `rssMb` sums RSS.
+ */
+function vscodeMemoryMB(): { mb: number; rssMb: number; processes: number; root: string; top: string } {
+  const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8' })
+    .trim()
+    .split('\n')
+    .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l))
+    .filter((m): m is RegExpExecArray => !!m)
+    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), kb: Number(m[3]), comm: m[4] }));
+  const byPid = new Map(rows.map((r) => [r.pid, r]));
+  const children = new Map<number, number[]>();
+  for (const r of rows) children.set(r.ppid, [...(children.get(r.ppid) ?? []), r.pid]);
+  // Walk up from the extension host to the main process ("…/Contents/MacOS/Code")
+  let root = process.pid;
+  while (byPid.get(root) && !/\/MacOS\/(Code|Electron)$/.test(byPid.get(root)!.comm) && byPid.get(root)!.ppid > 1) root = byPid.get(root)!.ppid;
+  const foot = footprints();
+  let rssKb = 0;
+  let footKb = 0;
+  const tree: Array<{ pid: number; kb: number; comm: string }> = [];
+  const stack = [root];
+  while (stack.length) {
+    const pid = stack.pop()!;
+    const r = byPid.get(pid);
+    if (r) {
+      rssKb += r.kb;
+      footKb += foot.get(pid) ?? 0;
+      tree.push({ ...r, kb: foot.get(pid) ?? 0 });
+    }
+    stack.push(...(children.get(pid) ?? []));
+  }
+  const top = tree
+    .sort((a, b) => b.kb - a.kb)
+    .slice(0, 5)
+    .map((r) => `${path.basename(r.comm)} ${Math.round(r.kb / 1024)}MB`)
+    .join('; ');
+  return { mb: Math.round(footKb / 1024), rssMb: Math.round(rssKb / 1024), processes: tree.length, root: path.basename(byPid.get(root)?.comm ?? '?'), top };
+}
+
+test('memory per inset', async () => {
+  const p = path.join(WS, 'p0-memory.txt');
+  fs.writeFileSync(p, Array.from({ length: 240 }, (_, i) => `line ${i}`).join('\n'));
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
+  await sleep(1500);
+  const before = vscodeMemoryMB();
+  const rendered = new Set<number>();
+  const insets = Array.from({ length: 40 }, (_, i) => {
+    const inset = vscode.window.createWebviewTextEditorInset(ed, i * 6, 1, { enableScripts: true });
+    inset.webview.onDidReceiveMessage((m) => m?.cmd === 'metrics' && rendered.add(i));
+    inset.webview.html = renderRemovedLines([`removed ${i}`], { tabSize: 4, letterSpacing: 0, ligatures: false });
+    return inset;
+  });
+  // Scroll through the file so every inset comes into view once
+  for (let line = 0; line < 240; line += 12) {
+    ed.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.AtTop);
+    await sleep(300);
+  }
+  await sleep(1500);
+  const all = vscodeMemoryMB();
+  ed.revealRange(new vscode.Range(0, 0, 0, 0), vscode.TextEditorRevealType.AtTop);
+  await sleep(1500);
+  const top = vscodeMemoryMB();
+  insets.forEach((i) => i.dispose());
+  await sleep(1500);
+  const disposed = vscodeMemoryMB();
+  const each = (a: number, b: number) => ((b - a) / 40).toFixed(1);
+  log.push(
+    `    40 insets (${rendered.size} reported rendering): ${before.processes} -> ${all.processes} processes; ` +
+      `footprint ${before.mb} -> ${all.mb} MB (${each(before.mb, all.mb)} MB per inset), RSS ${before.rssMb} -> ${all.rssMb} MB (${each(before.rssMb, all.rssMb)} MB per inset)`,
+    `    scrolled back to the top: ${top.processes} processes, ${top.mb} MB; 1.5 s after disposing them: ${disposed.processes} processes, ${disposed.mb} MB`,
+    `    largest with insets: ${all.top}`,
+  );
+});
+
+test('scrolling back and forth over a file with many changes', async () => {
+  const before = Array.from({ length: 400 }, (_, i) => `const v${i} = ${i};`);
+  // 20 changed lines, one every 20 lines: each gets a red line inset and a buttons inset
+  const after = before.map((l, i) => (i % 20 === 10 ? l.replace('= ', '= 1 + ') : l));
+  const p = claudeWrites('scroll/many.ts', before.join('\n') + '\n', after.join('\n') + '\n');
+  await pending(p, 20);
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  const m0 = vscodeMemoryMB();
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
+  await waitFor('insets near the top', () => ins.insetCount > 0);
+  const passes: string[] = [];
+  const t0 = Date.now();
+  for (let pass = 1; pass <= 3; pass++) {
+    for (let line = 0; line <= 400; line += 40) {
+      ed.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.AtTop);
+      await sleep(150);
+    }
+    for (let line = 400; line >= 0; line -= 40) {
+      ed.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.AtTop);
+      await sleep(150);
+    }
+    passes.push(String(ins.created - c0));
+  }
+  const m1 = vscodeMemoryMB();
+  log.push(
+    `    20 changes (40 insets and a file bar): insets created after each pass down and up: ${passes.join(', ')} (${Date.now() - t0}ms); ` +
+      `${ins.insetCount + ins.changeButtonCount} alive; VS Code ${m0.processes} -> ${m1.processes} processes, ${m0.mb} -> ${m1.mb} MB`,
+  );
+  // Each inset is created once and kept: a disposed inset's renderer process lives on until the editor closes
+  assert.deepEqual(passes, ['41', '41', '41']);
+});
+
 // ---------------- In-editor review ----------------
 
 test('after Claude edits a file: hunks, phantom lines and buttons below each change appear', async () => {
@@ -417,6 +536,22 @@ test('Keep All / Undo All (model level, no confirmation dialog)', async () => {
   assert.equal(fs.readFileSync(b, 'utf8'), 'b\n');
 });
 
+test('the extension trims the snapshot cache in a child process (real hook.js)', async () => {
+  fs.mkdirSync(L.snapshots, { recursive: true });
+  const stale = path.join(L.snapshots, `${'0'.repeat(40)}.json`);
+  fs.writeFileSync(stale, JSON.stringify({ root: '/gone', ts: 0, files: {} }));
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
+  fs.utimesSync(stale, twoDaysAgo, twoDaysAgo);
+  const budget = () => (fs.existsSync(L.config) ? (JSON.parse(fs.readFileSync(L.config, 'utf8')) as { snapshotCacheMB?: number }).snapshotCacheMB : undefined);
+  const c = vscode.workspace.getConfiguration('ccReview');
+  await c.update('snapshotCacheMB', 120, vscode.ConfigurationTarget.Global);
+  try {
+    await waitFor('the budget to reach config.json for the hook', () => budget() === 120);
+    await waitFor('the folder index unused for two days to be dropped', () => !fs.existsSync(stale), 15_000);
+  } finally {
+    await c.update('snapshotCacheMB', undefined, vscode.ConfigurationTarget.Global);
+  }
+});
 
 // ---------------- Syntax highlighting, rounds, Ask Claude ----------------
 
@@ -453,10 +588,15 @@ test('phantom lines are highlighted with the active theme; a removed line inside
   assert.notEqual(colorOf(returnLine, 'return'), colorOf(returnLine, '"text"'));
 });
 
-test('colors follow a switch to a light theme', async () => {
+test('colors follow a switch to a light theme, recoloring insets in place', async () => {
   const p = claudeWrites('hl/theme.ts', 'let x = "s"; // c\nend\n', 'end\n');
   const pf = await pending(p);
   const hl = api.controller.highlighter;
+  const ins = api.controller.insets;
+  await vscode.window.showTextDocument(vscode.Uri.file(p));
+  await waitFor('the deleted line to be drawn and colored', () => ins.insetCount === 1 && ins.highlighted.length > 0, 20_000);
+  const created = ins.created;
+  const reports = ins.highlightReports;
   const darkRows = await hl.highlight(p, pf.baseHash, 'typescript', pf.baseLines, 0, 1);
   const wb = vscode.workspace.getConfiguration('workbench');
   await wb.update('colorTheme', 'Default Light Modern', vscode.ConfigurationTarget.Global);
@@ -467,6 +607,8 @@ test('colors follow a switch to a light theme', async () => {
       return r && JSON.stringify(r) !== JSON.stringify(darkRows) ? r : undefined;
     });
     log.push(`    dark ${JSON.stringify(darkRows![0])}\n    light ${JSON.stringify(light[0])} (${hl.themeName})`);
+    await waitFor('the inset to receive the new colors', () => ins.highlightReports > reports, 20_000);
+    assert.equal(ins.created, created, 'switching themes should not rebuild insets');
   } finally {
     await wb.update('colorTheme', undefined, vscode.ConfigurationTarget.Global);
     await waitFor('the dark theme to return', () => vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark);
@@ -597,7 +739,10 @@ export async function run(): Promise<void> {
   assert.ok(ext, 'extension local.cc-review not found');
   api = await ext.activate();
   let failed = 0;
-  for (const [name, fn] of tests) {
+  // CCR_ONLY=<regex> runs only the matching tests
+  const only = process.env.CCR_ONLY ? new RegExp(process.env.CCR_ONLY) : undefined;
+  const selected = tests.filter(([name]) => !only || only.test(name));
+  for (const [name, fn] of selected) {
     const t0 = Date.now();
     try {
       await fn();
@@ -611,7 +756,7 @@ export async function run(): Promise<void> {
   }
   const m = api.controller.insets.metrics;
   log.push(`phantom line insets reported ${m.length} measurements, e.g. ${m.slice(0, 3).map((x) => `${x.lines} lines -> ${x.insetPx}px`).join(', ') || 'none'}`);
-  const summary = `${tests.length - failed}/${tests.length} passed`;
+  const summary = `${selected.length - failed}/${selected.length} passed`;
   fs.writeFileSync(process.env.CCR_RESULTS!, [...log, summary].join('\n') + '\n');
   if (failed) throw new Error(summary);
 }

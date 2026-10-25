@@ -586,7 +586,7 @@ footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wr
         <h2>Every way Claude changes a file</h2>
       </div>
       <dl class="feats">
-        <div><dt>Edits and shell commands</dt><dd>Edit, Write, MultiEdit and notebook edits, plus shell commands: the folders a command can touch are snapshotted before it runs and compared afterwards.</dd></div>
+        <div><dt>Edits and shell commands</dt><dd>Edit, Write, MultiEdit and notebook edits, plus shell commands: the folders a command can touch are snapshotted before it runs and compared afterwards. The copies are compressed, and the cache stays under 500 MB by dropping the folders used least recently.</dd></div>
         <div><dt>Your edits stay yours</dt><dd>What you type in a file under review, outside Claude's changes, is kept automatically. A file you save while a command runs isn't blamed on Claude.</dd></div>
         <div><dt>Claude hears about it</dt><dd>Your next message tells Claude which changes you undid, so it doesn't quietly put them back.</dd></div>
         <div><dt>Grouped by prompt</dt><dd>See which of your messages produced each change, open one prompt's diff, or keep and undo a whole prompt at once.</dd></div>

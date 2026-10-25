@@ -41,7 +41,7 @@ When Claude finishes responding, a notification lists the files it changed in th
 ![The notification shown when Claude finishes a turn, with Review, Keep All and Undo All buttons, next to the Claude Changes list in the Source Control sidebar](https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/turn-light.png#gh-light-mode-only)
 ![The notification shown when Claude finishes a turn, with Review, Keep All and Undo All buttons, next to the Claude Changes list in the Source Control sidebar](https://raw.githubusercontent.com/JiachengZhao98/keep-undo-for-claude-code/main/docs/images/turn-dark.png#gh-dark-mode-only)
 
-Every way Claude changes files is tracked: the Edit, Write, MultiEdit and NotebookEdit tools, and shell commands. Before a shell command runs, the folders it may touch are snapshotted (its starting directory, the project, every `cd` target and every path it names) and compared with the result afterwards. Inside a git repository this uses git, so only untracked files are copied. A folder outside git with more than 10,000 files is only tracked for the files a command names. Read-only commands such as `ls`, `grep` and `git status` are skipped. A file you save in VS Code while a command runs counts as yours, not Claude's.
+Every way Claude changes files is tracked: the Edit, Write, MultiEdit and NotebookEdit tools, and shell commands. Before a shell command runs, the folders it may touch are snapshotted (its starting directory, the project, every `cd` target and every path it names) and compared with the result afterwards. Inside a git repository this uses git, so only untracked files are copied. A folder outside git with more than 10,000 files is only tracked for the files a command names. Read-only commands such as `ls`, `grep` and `git status` are skipped. A file you save in VS Code while a command runs counts as yours, not Claude's. The copies are compressed and kept in a cache of at most 500 MB (`ccReview.snapshotCacheMB`): past that, the folders used least recently are dropped first, and folders unused for a day are dropped anyway.
 
 Not tracked: files outside those folders, changes a background command makes after it starts, files git ignores or in generated folders (`node_modules`, `dist`, `build` and the like), and files over 1 MB outside git.
 
@@ -72,7 +72,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 | --- | --- | --- |
 | `ccReview.autoKeepUserEdits` | `true` | Merge your edits outside Claude's changes into the baseline automatically |
 | `ccReview.phantomLines` | `inset` | How deleted lines are shown: `inset` (red phantom lines between the code lines) or `hover` |
-| `ccReview.maxInsetsPerEditor` | `20` | Maximum number of changes per editor that get insets (deleted lines and buttons) at a time; more appear as you scroll |
+| `ccReview.maxInsetsPerEditor` | `40` | Maximum number of insets (deleted lines and button rows) per editor. They appear as you scroll and stay until the editor closes; each is a webview with a process of its own (about 15-40 MB) |
 | `ccReview.maxFileSizeKB` | `1024` | Larger files can only be kept or undone as a whole |
 | `ccReview.showFilesOutsideWorkspace` | `false` | Also show files outside the workspace that Claude changed |
 | `ccReview.summaryWhenClaudeFinishes` | `true` | When Claude finishes responding, list the files it changed, with Review / Keep All / Undo All |
@@ -83,6 +83,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 | `ccReview.groupBy` | `file` | Group the Claude Changes view by file (`file`) or by prompt (`round`) |
 | `ccReview.nodePath` | auto | Absolute path of the node the hooks run with |
 | `ccReview.trackBash` | `true` | Also track files changed by shell commands; reinstall the hooks after changing it |
+| `ccReview.snapshotCacheMB` | `500` | Disk space for the cache of file copies that shell-command tracking keeps; the folders used least recently are dropped first |
 
 To keep files from being copied into `~/.cc-review/`, list them in `~/.cc-review/.ccreviewignore` (global) or in a `.ccreviewignore` in your project, using `.gitignore` syntax. `.env`, `*.pem`, `*.key` and similar files are ignored by default.
 
@@ -108,10 +109,11 @@ Within each round (one `prompt_id`), Post also keeps two snapshots of every file
 ```text
 ~/.cc-review/
   hook.js             copied here when the extension starts, so its path never changes
+  config.json         settings the hook needs (the snapshot cache budget), written by the extension
   .ccreviewignore     global ignore rules
   baselines/<sha1(path)>.json / .base   baseline metadata and content
   staging/            original content staged by Pre, removed after Post
-  snapshots/          folder states and file contents from before shell commands
+  snapshots/          folder states and file contents (Brotli-compressed, stored once per content) from before shell commands
   user-saves.jsonl    files saved in VS Code in the last hour, so a save during a command is not blamed on Claude
   events.jsonl        one line per write by Claude
   reverts.jsonl       one line per Undo
