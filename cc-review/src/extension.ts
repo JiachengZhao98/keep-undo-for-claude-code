@@ -9,7 +9,7 @@ import { appendJsonLine, readJsonLines, writeAtomic } from './core/fsutil';
 import { ReviewModel, type OpResult, type PendingFile } from './core/model';
 import { canonical, layoutOf, metaFile, type Layout } from './core/paths';
 import { promptTitle, RoundStore } from './core/rounds';
-import { contentHash } from './core/snapshot';
+import { contentHash, DEFAULT_CACHE_MB, gcSnapshots, saveSnapshotBudget } from './core/snapshot';
 import { Store } from './core/store';
 import { turnSummaryMessage } from './core/summary';
 import { plural, splitLines } from './core/text';
@@ -105,6 +105,7 @@ export class Controller implements vscode.Disposable {
   private readonly userEditQueue = new Map<string, Promise<void>>();
   private readonly rangeTimers = new Map<vscode.TextEditor, NodeJS.Timeout>();
   private uiTimer: NodeJS.Timeout | undefined;
+  private snapshotGcTimer: NodeJS.Timeout | undefined;
   private hooksOk = false;
   private hookState: HookStatus = 'missing';
   /** The last end-of-turn summary shown; read by the integration tests */
@@ -139,6 +140,7 @@ export class Controller implements vscode.Disposable {
     if (removedBaselines.length) this.out.info(`Removed ${removedBaselines.length} baselines older than 30 days`);
     const removedRounds = this.rounds.gc((key) => fs.existsSync(metaFile(this.L, key)));
     if (removedRounds) this.out.info(`Removed ${removedRounds} expired round snapshots`);
+    this.applySnapshotBudget(5000);
 
     const d = this.disposables;
     d.push(
@@ -457,6 +459,7 @@ export class Controller implements vscode.Disposable {
       this.model.opts.maxBytes = (cfg().get<number>('maxFileSizeKB') ?? 1024) * 1024;
       for (const f of this.model.getFiles()) this.scheduleRefresh(f.path, 0);
     }
+    if (e.affectsConfiguration('ccReview.snapshotCacheMB')) this.applySnapshotBudget(0);
     if (e.affectsConfiguration('ccReview.showFilesOutsideWorkspace')) this.scheduleUi();
     if (e.affectsConfiguration('ccReview.groupBy')) this.applyGroupMode();
     if (e.affectsConfiguration('ccReview.trackBash') && this.hooksOk) {
@@ -472,6 +475,31 @@ export class Controller implements vscode.Disposable {
       this.renderAll();
       this.codeLens.refresh();
     }
+  }
+
+  /**
+   * Hand ccReview.snapshotCacheMB to the hook (it cannot read VS Code settings) and trim the shell
+   * snapshot cache to it. At startup this waits a few seconds, off the activation path.
+   */
+  private applySnapshotBudget(delay: number): void {
+    const mb = cfg().get<number>('snapshotCacheMB') ?? DEFAULT_CACHE_MB;
+    try {
+      saveSnapshotBudget(this.L, mb);
+    } catch (e) {
+      this.out.error(`Failed to save the snapshot cache budget: ${String(e)}`);
+    }
+    clearTimeout(this.snapshotGcTimer);
+    this.snapshotGcTimer = setTimeout(() => {
+      try {
+        const r = gcSnapshots(this.L);
+        const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+        if (r.dropped || r.freedBytes) {
+          this.out.info(`Snapshot cache: dropped ${plural(r.dropped, 'folder')}, freed ${size(r.freedBytes)}, ${size(r.keptBytes)} kept (budget ${mb} MB)`);
+        }
+      } catch (e) {
+        this.out.error(`Failed to trim the snapshot cache: ${String(e)}`);
+      }
+    }, delay);
   }
 
   private scheduleRefresh(p: string, delay = 150): void {
@@ -859,6 +887,7 @@ export class Controller implements vscode.Disposable {
   dispose(): void {
     this.watcher?.dispose();
     clearTimeout(this.uiTimer);
+    clearTimeout(this.snapshotGcTimer);
     for (const t of this.refreshTimers.values()) clearTimeout(t);
     for (const t of this.rangeTimers.values()) clearTimeout(t);
     for (const d of this.disposables) d.dispose();
