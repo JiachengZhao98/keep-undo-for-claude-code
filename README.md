@@ -72,7 +72,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 | --- | --- | --- |
 | `ccReview.autoKeepUserEdits` | `true` | Merge your edits outside Claude's changes into the baseline automatically |
 | `ccReview.phantomLines` | `inset` | How deleted lines are shown: `inset` (red phantom lines between the code lines) or `hover` |
-| `ccReview.maxInsetsPerEditor` | `20` | Maximum number of changes per editor that get insets (deleted lines and buttons) at a time; more appear as you scroll |
+| `ccReview.maxInsetsPerEditor` | `40` | Maximum number of insets (deleted lines and button rows) per editor. They appear as you scroll and stay until the editor closes; each is a webview with a process of its own (about 15-40 MB) |
 | `ccReview.maxFileSizeKB` | `1024` | Larger files can only be kept or undone as a whole |
 | `ccReview.showFilesOutsideWorkspace` | `false` | Also show files outside the workspace that Claude changed |
 | `ccReview.summaryWhenClaudeFinishes` | `true` | When Claude finishes responding, list the files it changed, with Review / Keep All / Undo All |

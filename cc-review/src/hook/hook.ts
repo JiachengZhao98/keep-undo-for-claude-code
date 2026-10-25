@@ -7,6 +7,7 @@
 //   stop       Stop: append a turn-end event, so the extension can summarize what Claude changed in this turn
 //   bash-pre   PreToolUse(Bash): snapshot the folders the command may change
 //   bash-post  PostToolUse(Bash): find the files the command changed and take baselines from the snapshot
+//   gc         Run by the extension, not Claude Code: trim the snapshot cache and print the result as JSON
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
     else if (mode === 'stop') appendJsonLine(L.events, { type: 'turn-end', session: input.session_id, prompt: input.prompt_id, ts: Date.now() });
     else if (mode === 'bash-pre') bashPre(L, input);
     else if (mode === 'bash-post') bashPost(L, input);
+    else if (mode === 'gc') process.stdout.write(JSON.stringify(gcSnapshots(L)));
     else log(L, mode, `unknown mode`);
   } catch (e) {
     log(L, mode, e instanceof Error ? (e.stack ?? e.message) : String(e));

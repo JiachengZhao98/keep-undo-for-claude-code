@@ -41,6 +41,8 @@ try {
       CCR_WORKSPACE: workspace,
       CCR_RESULTS: resultFile,
       CCR_NO_TRASH: '1',
+      // A regex: run only the tests whose names match
+      CCR_ONLY: process.env.CCR_ONLY ?? '',
     },
   });
 } catch (e) {

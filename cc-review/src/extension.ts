@@ -1,4 +1,5 @@
 // activate: wires up the modules and registers commands.
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -9,7 +10,7 @@ import { appendJsonLine, readJsonLines, writeAtomic } from './core/fsutil';
 import { ReviewModel, type OpResult, type PendingFile } from './core/model';
 import { canonical, layoutOf, metaFile, type Layout } from './core/paths';
 import { promptTitle, RoundStore } from './core/rounds';
-import { contentHash, DEFAULT_CACHE_MB, gcSnapshots, saveSnapshotBudget } from './core/snapshot';
+import { contentHash, DEFAULT_CACHE_MB, saveSnapshotBudget, type SnapshotGc } from './core/snapshot';
 import { Store } from './core/store';
 import { turnSummaryMessage } from './core/summary';
 import { plural, splitLines } from './core/text';
@@ -153,18 +154,15 @@ export class Controller implements vscode.Disposable {
       this.baselines,
       this.highlighter,
       vscode.workspace.registerTextDocumentContentProvider(ROUND_SCHEME, this.roundService),
-      // Theme changed: recolor phantom lines with the new theme
-      this.highlighter.onDidChangeTheme(() => {
-        this.insets.clearAll();
-        this.renderAll();
-      }),
+      // Theme changed: recolor phantom lines in place (rebuilding an inset costs a renderer process until its editor closes)
+      this.highlighter.onDidChangeTheme(() => this.insets.recolorAll()),
       // Claude Code extension installed or removed: show or hide the "Ask Claude" buttons
       vscode.extensions.onDidChange(() => {
         const ask = claudeInstalled();
         if (ask === this.askEnabled) return;
         this.askEnabled = this.insets.askEnabled = ask;
         void vscode.commands.executeCommand('setContext', 'ccReview.claudeInstalled', ask);
-        this.insets.clearAll();
+        // Insets with buttons depend on askEnabled (it is part of their signature), so rendering replaces just those
         this.renderAll();
         this.codeLens.refresh();
       }),
@@ -467,11 +465,14 @@ export class Controller implements vscode.Disposable {
         .showInformationMessage('ccReview.trackBash changed. Reinstall the hooks for it to take effect.', 'Reinstall')
         .then((pick) => (pick ? this.runInstall() : undefined));
     }
+    if (e.affectsConfiguration('ccReview.syntaxHighlight')) this.insets.recolorAll();
     const fontChanged = ['editor.fontFamily', 'editor.fontSize', 'editor.lineHeight', 'editor.letterSpacing', 'editor.fontLigatures', 'editor.fontWeight'].some(
       (k) => e.affectsConfiguration(k),
     );
+    // Font settings are baked into the insets, so they are rebuilt. Other settings only add or remove the
+    // insets they affect: rebuilding an inset costs a renderer process until its editor closes
+    if (fontChanged) for (const ed of vscode.window.visibleTextEditors) this.insets.clear(ed);
     if (fontChanged || e.affectsConfiguration('ccReview')) {
-      for (const ed of vscode.window.visibleTextEditors) this.insets.clear(ed);
       this.renderAll();
       this.codeLens.refresh();
     }
@@ -479,7 +480,9 @@ export class Controller implements vscode.Disposable {
 
   /**
    * Hand ccReview.snapshotCacheMB to the hook (it cannot read VS Code settings) and trim the shell
-   * snapshot cache to it. At startup this waits a few seconds, off the activation path.
+   * snapshot cache to it. The trimming runs in a child process (hook.js gc): scanning a large cache
+   * takes a few hundred milliseconds, which would block the extension host. At startup it waits a
+   * few seconds, off the activation path.
    */
   private applySnapshotBudget(delay: number): void {
     const mb = cfg().get<number>('snapshotCacheMB') ?? DEFAULT_CACHE_MB;
@@ -490,15 +493,22 @@ export class Controller implements vscode.Disposable {
     }
     clearTimeout(this.snapshotGcTimer);
     this.snapshotGcTimer = setTimeout(() => {
-      try {
-        const r = gcSnapshots(this.L);
+      // VS Code's own executable runs as plain Node with ELECTRON_RUN_AS_NODE, so no separate node is needed
+      const child = execFile(process.execPath, [this.L.hookScript, 'gc'], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 60_000 }, (err, stdout) => {
+        if (err) return this.out.error(`Failed to trim the snapshot cache: ${String(err)}`);
+        let r: SnapshotGc;
+        try {
+          r = JSON.parse(stdout) as SnapshotGc;
+        } catch {
+          return this.out.error(`Unexpected output from the snapshot cache cleanup: ${stdout.slice(0, 200)}`);
+        }
         const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
         if (r.dropped || r.freedBytes) {
           this.out.info(`Snapshot cache: dropped ${plural(r.dropped, 'folder')}, freed ${size(r.freedBytes)}, ${size(r.keptBytes)} kept (budget ${mb} MB)`);
         }
-      } catch (e) {
-        this.out.error(`Failed to trim the snapshot cache: ${String(e)}`);
-      }
+      });
+      // hook.js reads its input from stdin first
+      child.stdin?.end();
     }, delay);
   }
 
@@ -543,7 +553,7 @@ export class Controller implements vscode.Disposable {
     if (!force && pf && pf.docVersion !== undefined && pf.docVersion !== ed.document.version) return;
     const useInsets = this.insetsShown();
     this.painter.paint(ed, pf, !useInsets, this.askEnabled);
-    if (useInsets) this.insets.update(ed, pf, cfg().get<number>('maxInsetsPerEditor') ?? 20);
+    if (useInsets) this.insets.update(ed, pf, cfg().get<number>('maxInsetsPerEditor') ?? 40);
     else this.insets.clear(ed);
   }
 

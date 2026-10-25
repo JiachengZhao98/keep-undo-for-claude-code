@@ -156,6 +156,20 @@ describe('hook pre/post', () => {
   });
 });
 
+describe('hook gc', () => {
+  it('trims the snapshot cache and prints the result for the extension', () => {
+    fs.mkdirSync(L().snapshots, { recursive: true });
+    const stale = path.join(L().snapshots, `${'0'.repeat(40)}.json`);
+    fs.writeFileSync(stale, JSON.stringify({ root: '/gone', ts: 0, files: {} }));
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
+    fs.utimesSync(stale, twoDaysAgo, twoDaysAgo);
+    const r = run('gc', '');
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ dropped: 1, freedBytes: 0, keptBytes: 0 });
+    expect(fs.existsSync(stale)).toBe(false);
+  });
+});
+
 describe('hook stop', () => {
   it('appends a turn-end event and prints nothing', () => {
     fs.mkdirSync(home, { recursive: true });
