@@ -386,9 +386,9 @@
         },
         "ccReview.maxInsetsPerEditor": {
           "type": "number",
-          "default": 20,
+          "default": 40,
           "minimum": 1,
-          "description": "Maximum number of changes per editor that get insets (deleted lines and buttons) at a time; each inset is a webview. More are added as you scroll."
+          "description": "Maximum number of insets per editor: blocks of deleted lines and rows of buttons below changes. They are created as you scroll and kept until the editor closes. Each one is a webview, and VS Code gives every webview its own process (about 15-40 MB) until the editor closes, so past this number the farthest from view are replaced."
         },
         "ccReview.maxFileSizeKB": {
           "type": "number",
