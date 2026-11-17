@@ -62,6 +62,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 - The next time you send Claude a message, the hook tells it which changes you undid, so it does not add them back.
 - For a file Claude created, Undo deletes the file (it moves to the Trash, after you confirm).
 - Phantom lines are colored with the same TextMate grammars and active theme as the editor, and follow theme switches. Deleted lines in the middle of a block comment or template string are colored correctly too.
+- Deleted lines and buttons sit in small webviews between the code lines, the only way VS Code lets an extension draw there. They behave like part of the editor all the same: the mouse wheel scrolls the editor while the pointer is over one, a click on deleted lines leaves the keyboard with the editor, and deleted lines show at once, in plain text, while their webview starts. When you split or move an editor, VS Code empties its webviews; they are rebuilt within a second.
 - The Claude Changes view shows which of your messages each change came from: hover a change, or group by prompt. Attribution traces lines through snapshots: if a later prompt edits lines an earlier prompt added, they belong to the later prompt; lines you add yourself between prompts are not counted as Claude's.
 - "Ask Claude" opens Claude Code with `@file#lines` and the change's original content prefilled (prefilled only, not sent), in the session that made the change. If that session is not in the current workspace, it starts a new conversation.
 - A git checkout, a Claude Code rewind, or changing the lines back by hand all take the file off the queue automatically.
@@ -72,7 +73,7 @@ Not tracked: files outside those folders, changes a background command makes aft
 | --- | --- | --- |
 | `ccReview.autoKeepUserEdits` | `true` | Merge your edits outside Claude's changes into the baseline automatically |
 | `ccReview.phantomLines` | `inset` | How deleted lines are shown: `inset` (red phantom lines between the code lines) or `hover` |
-| `ccReview.maxInsetsPerEditor` | `40` | Maximum number of insets (deleted lines and button rows) per editor. They appear as you scroll and stay until the editor closes; each is a webview with a process of its own (about 15-40 MB) |
+| `ccReview.maxInsetsPerEditor` | `100` | Maximum number of insets (deleted lines and button rows) per editor. All of a file's insets are created when it is shown, those in view first, and stay while the editor shows it; each is a webview with a process of its own (about 15-40 MB) |
 | `ccReview.maxFileSizeKB` | `1024` | Larger files can only be kept or undone as a whole |
 | `ccReview.showFilesOutsideWorkspace` | `false` | Also show files outside the workspace that Claude changed |
 | `ccReview.summaryWhenClaudeFinishes` | `true` | When Claude finishes responding, list the files it changed, with Review / Keep All / Undo All |
@@ -132,8 +133,9 @@ Prompt text is stored only on your machine, in `~/.cc-review/rounds/` (Claude Co
 cd cc-review
 npm install
 npm run build              # dist/extension.js, dist/hook.js
-npm test                   # unit + hook tests (vitest, 114)
-npm run test:integration   # integration tests in a separate VS Code instance (29)
+npm test                   # unit + hook tests (vitest, 144)
+npm run test:integration   # integration tests in a separate VS Code instance (39)
+npm run test:perf          # performance scenarios in the same setup: time until insets show, frame times, scrolling
 npm run package            # build the VSIX
 ```
 
@@ -143,7 +145,7 @@ To release a version: set it in `cc-review/package.json`, merge to `main`, then 
 
 Open the `cc-review` folder in VS Code and press F5 to launch the Extension Development Host (`cc-review/.vscode/launch.json` already passes `--enable-proposed-api local.cc-review`).
 
-Code under `cc-review/src/core/` does not import `vscode`. The integration tests use the VS Code installed on this machine (override with `VSCODE_PATH`) with a separate user data directory, and point `CC_REVIEW_HOME` and `CLAUDE_CONFIG_DIR` at temporary directories, so real data is never touched. To debug the hooks, set `CC_REVIEW_DEBUG=1`; raw hook input is logged to `~/.cc-review/hook-debug.jsonl`.
+Code under `cc-review/src/core/` does not import `vscode`. The integration tests use the VS Code installed on this machine (override with `VSCODE_PATH`) with a separate user data directory, and point `CC_REVIEW_HOME` and `CLAUDE_CONFIG_DIR` at temporary directories, so real data is never touched. They start VS Code with a debug port, through which they send real wheel and mouse input to the window and read what it draws. To debug the hooks, set `CC_REVIEW_DEBUG=1`; raw hook input is logged to `~/.cc-review/hook-debug.jsonl`.
 
 ## Uninstall
 

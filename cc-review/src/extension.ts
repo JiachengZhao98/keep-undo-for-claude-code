@@ -105,6 +105,10 @@ export class Controller implements vscode.Disposable {
   private readonly refreshTimers = new Map<string, NodeJS.Timeout>();
   private readonly userEditQueue = new Map<string, Promise<void>>();
   private readonly rangeTimers = new Map<vscode.TextEditor, NodeJS.Timeout>();
+  /** Editors that just became visible and have not reported where they are scrolled to yet */
+  private readonly settling = new Map<vscode.TextEditor, NodeJS.Timeout>();
+  /** The editors visible at the last change of visible editors */
+  private known = new WeakSet<vscode.TextEditor>();
   private uiTimer: NodeJS.Timeout | undefined;
   private snapshotGcTimer: NodeJS.Timeout | undefined;
   private hooksOk = false;
@@ -172,6 +176,10 @@ export class Controller implements vscode.Disposable {
       vscode.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, this.preview),
       this.model.onDidChange((paths) => this.onModelChanged(paths)),
       this.insets.onDidBecomeUnavailable(() => this.renderAll()),
+      // The insets created so far are running: create the next ones
+      this.insets.onDidWantUpdate((ed) => {
+        if (vscode.window.visibleTextEditors.includes(ed)) this.renderEditor(ed, false, true);
+      }),
       vscode.workspace.onDidChangeTextDocument((e) => this.onDocChanged(e)),
       vscode.workspace.onDidSaveTextDocument((doc) => {
         this.onDocLifecycle(doc, 0);
@@ -192,9 +200,15 @@ export class Controller implements vscode.Disposable {
       }),
       vscode.window.onDidChangeVisibleTextEditors((eds) => {
         this.insets.retainEditors(eds);
+        this.settle(eds);
         this.renderAll();
       }),
       vscode.window.onDidChangeTextEditorVisibleRanges((e) => this.onVisibleRangesChanged(e.textEditor)),
+      // Moving an editor within the window reloads its insets' frames, which then stay empty: find and rebuild those
+      vscode.window.tabGroups.onDidChangeTabGroups((e) => {
+        if (e.opened.length || e.closed.length) this.insets.check();
+      }),
+      vscode.window.onDidChangeTextEditorViewColumn(() => this.insets.check()),
       vscode.window.onDidChangeActiveTextEditor(() => this.updateContextKeys()),
       vscode.window.onDidChangeTextEditorOptions((e) => this.renderEditor(e.textEditor, true)),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -226,6 +240,7 @@ export class Controller implements vscode.Disposable {
     d.push({ dispose: () => clearInterval(poll) });
 
     this.checkHooks();
+    this.known = new WeakSet(vscode.window.visibleTextEditors);
     this.renderAll();
     this.scheduleUi();
     void this.maybeOfferInstall();
@@ -429,13 +444,47 @@ export class Controller implements vscode.Disposable {
     if (p && (this.model.getFile(p) || this.model.tracks(p))) this.scheduleRefresh(p, delay);
   }
 
+  /**
+   * An editor that becomes visible first reports the top of its file as visible, and only then the
+   * position VS Code restores for it. Insets created for the first report would be the wrong ones,
+   * and those above the restored position would push its text down. So a new editor gets its insets
+   * once it has reported a scroll position, or after a moment if none comes (it is at the top).
+   */
+  private settle(visible: readonly vscode.TextEditor[]): void {
+    for (const [ed, timer] of this.settling) {
+      if (visible.includes(ed)) continue;
+      clearTimeout(timer);
+      this.settling.delete(ed);
+    }
+    for (const ed of visible) {
+      if (this.known.has(ed) || ed.document.uri.scheme !== 'file') continue;
+      this.settling.set(
+        ed,
+        setTimeout(() => this.settled(ed), 30),
+      );
+    }
+    this.known = new WeakSet(visible);
+  }
+
+  private settled(ed: vscode.TextEditor): void {
+    const timer = this.settling.get(ed);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.settling.delete(ed);
+    if (vscode.window.visibleTextEditors.includes(ed)) this.renderEditor(ed, false, true);
+  }
+
   private onVisibleRangesChanged(editor: vscode.TextEditor): void {
-    clearTimeout(this.rangeTimers.get(editor));
+    this.insets.noteScrolled(editor);
+    if (this.settling.has(editor)) return this.settled(editor);
+    // At most every 100 ms, also during a long scroll: insets are created ahead of the visible range
+    if (this.rangeTimers.has(editor)) return;
     this.rangeTimers.set(
       editor,
       setTimeout(() => {
         this.rangeTimers.delete(editor);
-        this.renderEditor(editor);
+        // Scrolling changes which insets are near, not the decorations
+        if (vscode.window.visibleTextEditors.includes(editor)) this.renderEditor(editor, false, true);
       }, 100),
     );
   }
@@ -545,16 +594,17 @@ export class Controller implements vscode.Disposable {
     for (const ed of vscode.window.visibleTextEditors) this.renderEditor(ed);
   }
 
-  private renderEditor(ed: vscode.TextEditor, force = false): void {
+  /** insetsOnly: the changes are as painted before; only the insets may need work */
+  private renderEditor(ed: vscode.TextEditor, force = false, insetsOnly = false): void {
     if (ed.document.uri.scheme !== 'file') return;
     const p = this.idx.ofUri(ed.document.uri)!;
     const pf = this.model.getFile(p);
     // The model has not caught up with the latest edit (debouncing): keep the decorations VS Code already shifted, repaint after recomputing
     if (!force && pf && pf.docVersion !== undefined && pf.docVersion !== ed.document.version) return;
     const useInsets = this.insetsShown();
-    this.painter.paint(ed, pf, !useInsets, this.askEnabled);
-    if (useInsets) this.insets.update(ed, pf, cfg().get<number>('maxInsetsPerEditor') ?? 40);
-    else this.insets.clear(ed);
+    if (!insetsOnly) this.painter.paint(ed, pf, !useInsets, this.askEnabled);
+    if (!useInsets) this.insets.clear(ed);
+    else if (!this.settling.has(ed)) this.insets.update(ed, pf, cfg().get<number>('maxInsetsPerEditor') ?? 100);
   }
 
   private updateContextKeys(): void {
@@ -869,6 +919,13 @@ export class Controller implements vscode.Disposable {
       await this.askClaude([a.path, a.hunkId]);
       return;
     }
+    if (a.action === 'focus') {
+      // A click on deleted lines put keyboard focus in their webview, where typing goes nowhere
+      if (vscode.window.visibleTextEditors.includes(a.editor)) {
+        await vscode.window.showTextDocument(a.editor.document, { viewColumn: a.editor.viewColumn, preserveFocus: false });
+      }
+      return;
+    }
     if (a.action === 'keepFile') await this.keepFile(a.path);
     else if (a.action === 'undoFile') await this.undoFile(a.path);
     else if (a.action === 'keep') await this.keepHunk([a.path, a.hunkId]);
@@ -900,6 +957,7 @@ export class Controller implements vscode.Disposable {
     clearTimeout(this.snapshotGcTimer);
     for (const t of this.refreshTimers.values()) clearTimeout(t);
     for (const t of this.rangeTimers.values()) clearTimeout(t);
+    for (const t of this.settling.values()) clearTimeout(t);
     for (const d of this.disposables) d.dispose();
   }
 }
