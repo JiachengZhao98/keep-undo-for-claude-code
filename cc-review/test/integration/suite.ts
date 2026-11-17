@@ -12,6 +12,8 @@ import { Store } from '../../src/core/store';
 import type { CcReviewApi } from '../../src/extension';
 import { claudeOpenUri } from '../../src/ui/askClaude';
 import { renderRemovedLines } from '../../src/ui/phantomInsets';
+import { registerPerfTests, sample } from './perf';
+import { Probe } from './probe';
 
 const WS = canonical(process.env.CCR_WORKSPACE!);
 const L = layoutOf();
@@ -77,6 +79,62 @@ const activePath = () => {
 
 const tests: Array<[string, () => Promise<void>]> = [];
 const test = (name: string, fn: () => Promise<void>) => tests.push([name, fn]);
+
+let probing: Promise<Probe> | undefined;
+/** The window under test: real mouse and wheel input, and what is on screen */
+const probe = () => (probing ??= Probe.connect(Number(process.env.CCR_CDP_PORT)));
+
+/** Wait until the insets created since `created0` are running and no more appear */
+async function insetsSettled(created0: number, timeout = 30_000): Promise<void> {
+  const ins = api.controller.insets;
+  await waitFor('insets to be created', () => ins.created > created0, timeout);
+  let last = -1;
+  let since = 0;
+  await waitFor(
+    'insets to finish loading',
+    () => {
+      if (ins.loadingCount > 0 || ins.created !== last) {
+        last = ins.created;
+        since = Date.now();
+        return false;
+      }
+      return Date.now() - since > 400;
+    },
+    timeout,
+  );
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** The insets on screen, in window pixels, tallest first */
+async function insetsOnScreen(): Promise<Rect[]> {
+  const rects = await (
+    await probe()
+  ).evaluate<Rect[]>(
+    `[...document.querySelectorAll('.part.editor .view-zones iframe')].map((e) => { const r = e.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; }).filter((r) => r.h > 0)`,
+  );
+  return rects.sort((a, b) => b.h - a.h);
+}
+
+async function wheelAt(x: number, y: number, deltaY: number, times: number): Promise<void> {
+  const pr = await probe();
+  for (let i = 0; i < times; i++) {
+    await pr.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: Math.round(x), y: Math.round(y), deltaX: 0, deltaY });
+    await sleep(30);
+  }
+}
+
+async function clickAt(x: number, y: number): Promise<void> {
+  const pr = await probe();
+  const at = { x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 };
+  await pr.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at });
+  await pr.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at });
+}
 
 // ---------------- Inset rendering ----------------
 
@@ -237,7 +295,9 @@ test('scrolling back and forth over a file with many changes', async () => {
   const c0 = ins.created;
   const m0 = vscodeMemoryMB();
   const ed = await vscode.window.showTextDocument(vscode.Uri.file(p));
-  await waitFor('insets near the top', () => ins.insetCount > 0);
+  // All of the file's insets are created when it opens, not as they come near
+  await insetsSettled(c0);
+  assert.equal(ins.created - c0, 41);
   const passes: string[] = [];
   const t0 = Date.now();
   for (let pass = 1; pass <= 3; pass++) {
@@ -256,7 +316,7 @@ test('scrolling back and forth over a file with many changes', async () => {
     `    20 changes (40 insets and a file bar): insets created after each pass down and up: ${passes.join(', ')} (${Date.now() - t0}ms); ` +
       `${ins.insetCount + ins.changeButtonCount} alive; VS Code ${m0.processes} -> ${m1.processes} processes, ${m0.mb} -> ${m1.mb} MB`,
   );
-  // Each inset is created once and kept: a disposed inset's renderer process lives on until the editor closes
+  // Scrolling creates none and removes none
   assert.deepEqual(passes, ['41', '41', '41']);
 });
 
@@ -453,6 +513,192 @@ test('inserting lines above an inset shifts it without rebuilding', async () => 
   assert.equal(api.controller.insets.insetCount, 1);
   assert.equal(api.model.getFile(p)!.hunks[0].curStart, 3);
   await ed.document.save();
+});
+
+test('the wheel scrolls the editor while the pointer is over an inset', async () => {
+  // Lines 11-22 deleted: a red block of 12 lines, taller than a few wheel notches
+  const before = Array.from({ length: 300 }, (_, i) => `const v${i} = ${i};`);
+  const after = before.filter((_, i) => i < 10 || i > 21);
+  const p = claudeWrites('wheel/a.ts', before.join('\n') + '\n', after.join('\n') + '\n');
+  await pending(p, 1);
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  await insetsSettled(c0);
+  const first = () => ed.visibleRanges[0]?.start.line ?? 0;
+  assert.equal(first(), 0);
+  let [block] = await insetsOnScreen();
+  assert.ok(block && block.h > 150, 'the block of deleted lines is on screen');
+  const w0 = ins.wheelEvents;
+  // Three notches move the editor by 150px: the pointer is over the block for all of them
+  await wheelAt(block.x + 200, block.y + block.h / 2, 40, 3);
+  await waitFor('the editor to scroll', () => first() >= 5);
+  assert.equal(ins.wheelEvents - w0, 3);
+
+  // Splitting the editor area moves the editor in the window, which empties its insets: they are created again
+  const other = path.join(WS, 'wheel/other.ts');
+  fs.writeFileSync(other, 'x\n');
+  const revived = ins.revived;
+  await vscode.window.showTextDocument(vscode.Uri.file(other), { viewColumn: vscode.ViewColumn.Beside, preview: false });
+  await waitFor('the emptied insets to be found', () => ins.revived > revived);
+  await waitFor('their replacements to run', () => ins.loadingCount === 0);
+  await sleep(300);
+
+  // An editor that is not the active one scrolls too, in whole lines
+  assert.notEqual(vscode.window.activeTextEditor, ed);
+  [block] = await insetsOnScreen();
+  assert.ok(block && block.h > 100, 'the block is on screen beside the other editor');
+  const from = first();
+  const w1 = ins.wheelEvents;
+  await wheelAt(block.x + 100, block.y + block.h / 2, 40, 3);
+  await waitFor('the inactive editor to scroll', () => first() >= from + 5);
+  assert.ok(ins.wheelEvents > w1);
+});
+
+test('a click on deleted lines gives the keyboard back to the editor', async () => {
+  const before = Array.from({ length: 40 }, (_, i) => `const v${i} = ${i};`);
+  const after = before.filter((_, i) => i < 5 || i > 9);
+  const p = claudeWrites('focus/a.ts', before.join('\n') + '\n', after.join('\n') + '\n');
+  await pending(p, 1);
+  const c0 = api.controller.insets.created;
+  await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  await insetsSettled(c0);
+  const [block] = await insetsOnScreen();
+  assert.ok(block && block.h > 80, 'the block of deleted lines is on screen');
+  const pr = await probe();
+  const focus = () =>
+    pr.evaluate<string>(`(() => { const e = document.activeElement; return !e ? 'nothing' : e.tagName === 'IFRAME' ? 'an inset' : e.closest('.part.editor .monaco-editor') ? 'the editor' : e.tagName; })()`);
+  // On the second deleted line, away from the buttons below the block
+  await clickAt(block.x + 300, block.y + 27);
+  await waitForAsync('keyboard focus to be back in the editor', async () => (await focus()) === 'the editor');
+});
+
+test('editing inside a change keeps its insets, and their buttons act on the change as it is now', async () => {
+  const p = claudeWrites('reuse/typed.ts', 'a\nb\nc\nd\ne\n', 'a\nB1\nB2\nc\nd\ne\n');
+  const pf = await pending(p, 1);
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  await insetsSettled(c0);
+  // The file bar, the deleted line, and the buttons below the change
+  assert.equal(ins.created - c0, 3);
+  const id = pf.hunks[0].id;
+  for (const ch of ['x', 'y', 'z']) {
+    await ed.edit((eb) => eb.insert(new vscode.Position(1, 2), ch));
+    await sleep(250);
+  }
+  await waitFor('the change to get a new id', () => {
+    const f = api.model.getFile(p);
+    return f && f.docVersion === ed.document.version && f.hunks.length === 1 && f.hunks[0].id !== id;
+  });
+  await sleep(300);
+  assert.equal(ins.created - c0, 3, 'no inset was created again');
+  assert.equal(ins.insetCount, 1);
+  assert.equal(ins.changeButtonCount, 1);
+  // The row of buttons is the one-line inset; Keep is its first button
+  const row = (await insetsOnScreen()).find((r) => Math.round(r.h) === expectedLineHeight());
+  assert.ok(row, 'the row of buttons is on screen');
+  await clickAt(row.x + 20, row.y + row.h / 2);
+  await resolved(p);
+  await ed.document.save();
+});
+
+test('when Claude changes a change again, its insets stay', async () => {
+  const p = claudeWrites('reuse/again.ts', 'a\nb\nc\nd\ne\n', 'a\nB\nc\nd\ne\n');
+  await pending(p, 1);
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  const ed = await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  await insetsSettled(c0);
+  for (const text of ['a\nB again\nc\nd\ne\n', 'a\nB again\nand more\nc\nd\ne\n']) {
+    fs.writeFileSync(p, text);
+    appendJsonLine(L.events, { type: 'claude-write', path: p, tool: 'Edit', session: 'it-session', ts: Date.now() });
+    await waitFor('the model to follow the write', () => ed.document.getText() === text && api.model.getFile(p)?.docVersion === ed.document.version);
+    await sleep(300);
+  }
+  // The second write made the change a line longer, so its buttons moved down: one new inset. The deleted line stayed
+  assert.equal(ins.created - c0, 4);
+  assert.equal(ins.insetCount, 1);
+  assert.equal(ins.changeButtonCount, 1);
+});
+
+test('deleted lines are drawn at once, before their inset runs, and the preview goes when it does', async () => {
+  const before = Array.from({ length: 30 }, (_, i) => `const v${i} = ${i};`);
+  before[4] = 'const marker = "only in the deleted line"; // \\ <x> {y}';
+  const after = before.filter((_, i) => i !== 4);
+  const p = claudeWrites('preview/a.ts', before.join('\n') + '\n', after.join('\n') + '\n');
+  await pending(p, 1);
+  const pr = await probe();
+  // What the editor itself draws below the start of a line, outside any inset
+  const drawn = () =>
+    pr.evaluate<string[]>(
+      `[...document.querySelectorAll('.part.editor .view-line span')].map((e) => getComputedStyle(e, '::before').content).filter((c) => c.includes('only in the deleted line'))`,
+    );
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  void vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  let seen: string[] = [];
+  let loadingThen = -1;
+  await waitForAsync('the preview of the deleted line', async () => {
+    seen = await drawn();
+    loadingThen = ins.loadingCount;
+    return seen.length > 0;
+  });
+  // The text arrives as written, quotes, backslash and brackets included
+  assert.equal(JSON.parse(seen[0]), before[4]);
+  log.push(`    preview on screen with ${loadingThen} of ${ins.created - c0} insets still starting`);
+  assert.ok(loadingThen > 0, 'the preview was there before the insets ran');
+  await insetsSettled(c0);
+  await waitForAsync('the preview to go once the inset shows the line', async () => (await drawn()).length === 0);
+});
+
+test('insets out of view keep running: none is taken for stopped', async () => {
+  const s = sample();
+  const p = claudeWrites('alive/a.ts', s.before, s.after);
+  await pending(p, s.hunks);
+  const ins = api.controller.insets;
+  const c0 = ins.created;
+  await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  await insetsSettled(c0);
+  assert.ok(ins.created - c0 > 10, 'more insets than fit in view');
+  const revived = ins.revived;
+  ins.check();
+  await sleep(1200);
+  assert.equal(ins.revived, revived);
+  assert.equal(ins.created - c0, ins.insetCount + ins.changeButtonCount - ins.bothCount + ins.fileBarCount);
+});
+
+test('insets created above the visible range leave the text in view where it is, also after a tab switch', async () => {
+  const s = sample();
+  const p = claudeWrites('stable/a.ts', s.before, s.after);
+  await pending(p, s.hunks);
+  const other = path.join(WS, 'stable/other.ts');
+  fs.writeFileSync(other, 'x\n');
+  const ins = api.controller.insets;
+  // Fewer insets allowed than the file has: jumping far down replaces the ones at the top with ones around the new position
+  const c = vscode.workspace.getConfiguration('ccReview');
+  await c.update('maxInsetsPerEditor', 12, vscode.ConfigurationTarget.Global);
+  try {
+    let c0 = ins.created;
+    let ed = await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+    await insetsSettled(c0);
+    c0 = ins.created;
+    ed.revealRange(new vscode.Range(250, 0, 250, 0), vscode.TextEditorRevealType.AtTop);
+    // VS Code leaves a few lines above a line revealed "at top"
+    const top = await waitFor('the editor to jump', () => (ed.visibleRanges[0].start.line > 200 ? ed.visibleRanges[0].start.line : undefined));
+    await insetsSettled(c0);
+    assert.ok(ins.created - c0 >= 8, 'insets were created around the new position');
+    assert.equal(ed.visibleRanges[0].start.line, top);
+
+    await vscode.window.showTextDocument(vscode.Uri.file(other), { preview: false });
+    await waitFor('the insets to go with their editor', () => ins.insetCount === 0);
+    c0 = ins.created;
+    ed = await vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+    await insetsSettled(c0);
+    assert.equal(ed.visibleRanges[0].start.line, top);
+  } finally {
+    await c.update('maxInsetsPerEditor', undefined, vscode.ConfigurationTarget.Global);
+  }
 });
 
 test('hover fallback: no insets with phantomLines = hover', async () => {
@@ -733,6 +979,9 @@ test('the Ask Claude URI query is decoded exactly once after VS Code serializes 
     assert.equal(q.get('session'), 'abc-123');
   }
 });
+
+// Measurements only, and they need the debug port: npm run test:perf
+if (process.env.CCR_PERF) registerPerfTests({ test, api: () => api, log, WS, claudeWrites, pending, waitFor, sleep });
 
 export async function run(): Promise<void> {
   const ext = vscode.extensions.getExtension<CcReviewApi>('local.cc-review');
